@@ -1,0 +1,586 @@
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
+local RunService = game:GetService("RunService")
+
+-- Network Setup
+local Net = ReplicatedStorage.Packages._Index["sleitnick_net@0.2.0"].net
+
+-- Configuration - Semua bisa diubah!
+local Config = {
+    AutoFish = false,
+    AntiAFK = true,
+    NoAnimation = false,
+    
+    -- Timing Settings (semua dalam detik)
+    ChargeWait = 0.6,      -- Waktu charge rod
+    AfterCharge = 0.15,    -- Delay setelah charge
+    CastWait = 0.2,        -- Delay sebelum cast
+    MinigameWait = 3.5,    -- Waktu tunggu ikan gigit
+    BeforeComplete = 0.3,  -- Delay sebelum complete
+    AfterComplete = 0.4,   -- Delay setelah complete
+    
+    -- Cast Settings
+    CastPower = 0.55,      -- Power lempar (0-1)
+    CastAngleMin = -0.8,   -- Angle minimal
+    CastAngleMax = 0.8     -- Angle maksimal
+}
+
+-- Stats Tracking
+local Stats = {
+    StartTime = 0,
+    FishCaught = 0,
+    Attempts = 0,
+    Errors = 0
+}
+
+-- Animation Controller
+local AnimationController = {
+    OriginalAnimate = nil,
+    IsDisabled = false,
+    Connection = nil
+}
+
+function AnimationController:Disable()
+    if self.IsDisabled then return end
+    
+    pcall(function()
+        local char = Player.Character
+        if not char then return end
+        
+        local humanoid = char:FindFirstChild("Humanoid")
+        if humanoid then
+            -- Stop all playing animations
+            for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                track:Stop()
+            end
+            
+            -- Prevent new animations from playing
+            self.Connection = humanoid.AnimationPlayed:Connect(function(animTrack)
+                if Config.NoAnimation then
+                    animTrack:Stop()
+                end
+            end)
+        end
+        
+        -- Disable Animate script
+        local animate = char:FindFirstChild("Animate")
+        if animate then
+            self.OriginalAnimate = animate:Clone()
+            animate.Enabled = false
+        end
+    end)
+    
+    self.IsDisabled = true
+    print("🚫 Animations disabled")
+end
+
+function AnimationController:Enable()
+    if not self.IsDisabled then return end
+    
+    pcall(function()
+        local char = Player.Character
+        if not char then return end
+        
+        if self.Connection then
+            self.Connection:Disconnect()
+            self.Connection = nil
+        end
+        
+        local animate = char:FindFirstChild("Animate")
+        if animate then
+            animate.Enabled = true
+        end
+    end)
+    
+    self.IsDisabled = false
+    print("✅ Animations enabled")
+end
+
+-- Anti-AFK System
+Player.Idled:Connect(function()
+    if Config.AntiAFK then
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end
+end)
+
+-- Auto Fish Function
+local FishingActive = false
+
+local function ExecuteFishingCycle()
+    Stats.Attempts = Stats.Attempts + 1
+    
+    local success, errorMsg = pcall(function()
+        print(string.format("🎣 Attempt #%d...", Stats.Attempts))
+        
+        -- Step 1: Charge Rod
+        FishingActive = true
+        Net["RF/ChargeFishingRod"]:InvokeServer()
+        task.wait(Config.ChargeWait)
+        task.wait(Config.AfterCharge)
+        
+        -- Step 2: Cast Rod
+        task.wait(Config.CastWait)
+        local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
+        local castTime = os.clock()
+        
+        Net["RF/RequestFishingMinigameStarted"]:InvokeServer(
+            angle,
+            Config.CastPower,
+            castTime
+        )
+        
+        -- Step 3: Wait for bite
+        task.wait(Config.MinigameWait)
+        
+        -- Step 4: Complete catch
+        task.wait(Config.BeforeComplete)
+        Net["RE/FishingCompleted"]:FireServer()
+        task.wait(Config.AfterComplete)
+        
+        FishingActive = false
+        Stats.FishCaught = Stats.FishCaught + 1
+        
+        print(string.format("✅ Fish caught! Total: %d", Stats.FishCaught))
+    end)
+    
+    if not success then
+        Stats.Errors = Stats.Errors + 1
+        FishingActive = false
+        warn(string.format("❌ Error: %s", tostring(errorMsg)))
+        task.wait(1)
+    end
+end
+
+local function StartFishingLoop()
+    while Config.AutoFish do
+        if not FishingActive then
+            ExecuteFishingCycle()
+        end
+        task.wait(0.1)
+    end
+end
+
+-- Create GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "FishItAutoFarm"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 450, 0, 550)
+MainFrame.Position = UDim2.new(0.5, -225, 0.5, -275)
+MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 12)
+UICorner.Parent = MainFrame
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(80, 160, 255)
+UIStroke.Thickness = 2
+UIStroke.Transparency = 0.5
+UIStroke.Parent = MainFrame
+
+-- Title
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 40)
+Title.BackgroundTransparency = 1
+Title.Text = "🎣 Fish It Auto Farm"
+Title.TextColor3 = Color3.fromRGB(100, 200, 255)
+Title.TextSize = 20
+Title.Font = Enum.Font.GothamBold
+Title.Parent = MainFrame
+
+local Subtitle = Instance.new("TextLabel")
+Subtitle.Size = UDim2.new(1, 0, 0, 18)
+Subtitle.Position = UDim2.new(0, 0, 0, 38)
+Subtitle.BackgroundTransparency = 1
+Subtitle.Text = "Full Control Edition - All Settings Customizable"
+Subtitle.TextColor3 = Color3.fromRGB(140, 140, 150)
+Subtitle.TextSize = 9
+Subtitle.Font = Enum.Font.Gotham
+Subtitle.Parent = MainFrame
+
+-- Auto Fish Button
+local AutoFishBtn = Instance.new("TextButton")
+AutoFishBtn.Size = UDim2.new(0, 410, 0, 45)
+AutoFishBtn.Position = UDim2.new(0.5, -205, 0, 60)
+AutoFishBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+AutoFishBtn.Text = "▶ START AUTO FISH"
+AutoFishBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoFishBtn.TextSize = 16
+AutoFishBtn.Font = Enum.Font.GothamBold
+AutoFishBtn.Parent = MainFrame
+
+local AutoFishCorner = Instance.new("UICorner")
+AutoFishCorner.CornerRadius = UDim.new(0, 8)
+AutoFishCorner.Parent = AutoFishBtn
+
+AutoFishBtn.MouseButton1Click:Connect(function()
+    Config.AutoFish = not Config.AutoFish
+    
+    if Config.AutoFish then
+        AutoFishBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100)
+        AutoFishBtn.Text = "⏸ STOP AUTO FISH"
+        
+        Stats.StartTime = os.clock()
+        Stats.FishCaught = 0
+        Stats.Attempts = 0
+        Stats.Errors = 0
+        
+        print("\n" .. string.rep("=", 50))
+        print("🎣 AUTO FISHING STARTED")
+        print(string.rep("=", 50))
+        
+        pcall(function()
+            Net["RF/UpdateAutoFishingState"]:InvokeServer(true)
+        end)
+        
+        task.spawn(StartFishingLoop)
+    else
+        AutoFishBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+        AutoFishBtn.Text = "▶ START AUTO FISH"
+        
+        print("\n" .. string.rep("=", 50))
+        print("🛑 FISHING STOPPED")
+        print(string.format("📊 Caught: %d fish in %d attempts", Stats.FishCaught, Stats.Attempts))
+        print(string.rep("=", 50))
+        
+        pcall(function()
+            Net["RF/UpdateAutoFishingState"]:InvokeServer(false)
+        end)
+        
+        FishingActive = false
+    end
+end)
+
+-- Feature Toggles
+local ToggleContainer = Instance.new("Frame")
+ToggleContainer.Size = UDim2.new(0, 410, 0, 45)
+ToggleContainer.Position = UDim2.new(0.5, -205, 0, 115)
+ToggleContainer.BackgroundTransparency = 1
+ToggleContainer.Parent = MainFrame
+
+-- Anti-AFK Toggle
+local AntiAFKBtn = Instance.new("TextButton")
+AntiAFKBtn.Size = UDim2.new(0, 200, 0, 45)
+AntiAFKBtn.Position = UDim2.new(0, 0, 0, 0)
+AntiAFKBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100)
+AntiAFKBtn.Text = "⏰ Anti-AFK: ON"
+AntiAFKBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AntiAFKBtn.TextSize = 14
+AntiAFKBtn.Font = Enum.Font.GothamBold
+AntiAFKBtn.Parent = ToggleContainer
+
+local AntiAFKCorner = Instance.new("UICorner")
+AntiAFKCorner.CornerRadius = UDim.new(0, 8)
+AntiAFKCorner.Parent = AntiAFKBtn
+
+AntiAFKBtn.MouseButton1Click:Connect(function()
+    Config.AntiAFK = not Config.AntiAFK
+    if Config.AntiAFK then
+        AntiAFKBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100)
+        AntiAFKBtn.Text = "⏰ Anti-AFK: ON"
+    else
+        AntiAFKBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+        AntiAFKBtn.Text = "⏰ Anti-AFK: OFF"
+    end
+end)
+
+-- No Animation Toggle
+local NoAnimBtn = Instance.new("TextButton")
+NoAnimBtn.Size = UDim2.new(0, 200, 0, 45)
+NoAnimBtn.Position = UDim2.new(0, 210, 0, 0)
+NoAnimBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+NoAnimBtn.Text = "🚫 No Anim: OFF"
+NoAnimBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+NoAnimBtn.TextSize = 14
+NoAnimBtn.Font = Enum.Font.GothamBold
+NoAnimBtn.Parent = ToggleContainer
+
+local NoAnimCorner = Instance.new("UICorner")
+NoAnimCorner.CornerRadius = UDim.new(0, 8)
+NoAnimCorner.Parent = NoAnimBtn
+
+NoAnimBtn.MouseButton1Click:Connect(function()
+    Config.NoAnimation = not Config.NoAnimation
+    if Config.NoAnimation then
+        NoAnimBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100)
+        NoAnimBtn.Text = "🚫 No Anim: ON"
+        AnimationController:Disable()
+    else
+        NoAnimBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+        NoAnimBtn.Text = "🚫 No Anim: OFF"
+        AnimationController:Enable()
+    end
+end)
+
+-- Settings ScrollFrame
+local SettingsLabel = Instance.new("TextLabel")
+SettingsLabel.Size = UDim2.new(1, -40, 0, 25)
+SettingsLabel.Position = UDim2.new(0, 20, 0, 170)
+SettingsLabel.BackgroundTransparency = 1
+SettingsLabel.Text = "⚙️ TIMING SETTINGS - Edit & Press ENTER"
+SettingsLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+SettingsLabel.TextSize = 13
+SettingsLabel.Font = Enum.Font.GothamBold
+SettingsLabel.TextXAlignment = Enum.TextXAlignment.Left
+SettingsLabel.Parent = MainFrame
+
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size = UDim2.new(0, 410, 0, 240)
+ScrollFrame.Position = UDim2.new(0.5, -205, 0, 200)
+ScrollFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+ScrollFrame.BorderSizePixel = 0
+ScrollFrame.ScrollBarThickness = 6
+ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 160, 255)
+ScrollFrame.Parent = MainFrame
+
+local ScrollCorner = Instance.new("UICorner")
+ScrollCorner.CornerRadius = UDim.new(0, 8)
+ScrollCorner.Parent = ScrollFrame
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Padding = UDim.new(0, 6)
+ListLayout.Parent = ScrollFrame
+
+-- Function to create setting input
+local function CreateSetting(name, configKey, defaultValue, description, layoutOrder)
+    local Container = Instance.new("Frame")
+    Container.Size = UDim2.new(1, -10, 0, 50)
+    Container.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    Container.LayoutOrder = layoutOrder
+    Container.Parent = ScrollFrame
+    
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 6)
+    Corner.Parent = Container
+    
+    local NameLabel = Instance.new("TextLabel")
+    NameLabel.Size = UDim2.new(0, 220, 0, 20)
+    NameLabel.Position = UDim2.new(0, 12, 0, 8)
+    NameLabel.BackgroundTransparency = 1
+    NameLabel.Text = name
+    NameLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
+    NameLabel.TextSize = 12
+    NameLabel.Font = Enum.Font.GothamSemibold
+    NameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    NameLabel.Parent = Container
+    
+    local DescLabel = Instance.new("TextLabel")
+    DescLabel.Size = UDim2.new(0, 220, 0, 16)
+    DescLabel.Position = UDim2.new(0, 12, 0, 28)
+    DescLabel.BackgroundTransparency = 1
+    DescLabel.Text = description
+    DescLabel.TextColor3 = Color3.fromRGB(140, 140, 150)
+    DescLabel.TextSize = 9
+    DescLabel.Font = Enum.Font.Gotham
+    DescLabel.TextXAlignment = Enum.TextXAlignment.Left
+    DescLabel.Parent = Container
+    
+    local InputBox = Instance.new("TextBox")
+    InputBox.Size = UDim2.new(0, 130, 0, 32)
+    InputBox.Position = UDim2.new(1, -145, 0.5, -16)
+    InputBox.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    InputBox.PlaceholderText = tostring(defaultValue)
+    InputBox.Text = tostring(defaultValue)
+    InputBox.TextColor3 = Color3.fromRGB(100, 200, 255)
+    InputBox.TextSize = 13
+    InputBox.Font = Enum.Font.GothamBold
+    InputBox.ClearTextOnFocus = false
+    InputBox.Parent = Container
+    
+    local InputCorner = Instance.new("UICorner")
+    InputCorner.CornerRadius = UDim.new(0, 6)
+    InputCorner.Parent = InputBox
+    
+    local InputStroke = Instance.new("UIStroke")
+    InputStroke.Color = Color3.fromRGB(60, 60, 70)
+    InputStroke.Thickness = 1
+    InputStroke.Parent = InputBox
+    
+    InputBox.FocusLost:Connect(function()
+        local value = tonumber(InputBox.Text)
+        if value then
+            Config[configKey] = value
+            InputBox.TextColor3 = Color3.fromRGB(50, 255, 100)
+            InputStroke.Color = Color3.fromRGB(50, 255, 100)
+            print(string.format("✅ %s: %.2f", name, value))
+            task.wait(0.3)
+            InputBox.TextColor3 = Color3.fromRGB(100, 200, 255)
+            InputStroke.Color = Color3.fromRGB(60, 60, 70)
+        else
+            InputBox.Text = tostring(Config[configKey])
+            InputBox.TextColor3 = Color3.fromRGB(255, 100, 100)
+            InputStroke.Color = Color3.fromRGB(255, 100, 100)
+            warn("❌ Invalid value for " .. name)
+            task.wait(0.5)
+            InputBox.TextColor3 = Color3.fromRGB(100, 200, 255)
+            InputStroke.Color = Color3.fromRGB(60, 60, 70)
+        end
+    end)
+end
+
+-- Create all settings
+CreateSetting("⏱️ Charge Wait", "ChargeWait", 0.6, "Waktu charge rod (detik)", 1)
+CreateSetting("⏱️ After Charge", "AfterCharge", 0.15, "Delay setelah charge (detik)", 2)
+CreateSetting("⏱️ Cast Wait", "CastWait", 0.2, "Delay sebelum melempar (detik)", 3)
+CreateSetting("🎣 Minigame Wait", "MinigameWait", 3.5, "Waktu tunggu ikan gigit (detik)", 4)
+CreateSetting("⏱️ Before Complete", "BeforeComplete", 0.3, "Delay sebelum complete (detik)", 5)
+CreateSetting("⏱️ After Complete", "AfterComplete", 0.4, "Delay setelah complete (detik)", 6)
+CreateSetting("💪 Cast Power", "CastPower", 0.55, "Kekuatan lempar (0-1)", 7)
+CreateSetting("📐 Angle Min", "CastAngleMin", -0.8, "Sudut minimal lempar", 8)
+CreateSetting("📐 Angle Max", "CastAngleMax", 0.8, "Sudut maksimal lempar", 9)
+
+-- Update canvas size
+task.wait()
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, ListLayout.AbsoluteContentSize.Y + 10)
+
+-- Stats Display
+local StatsFrame = Instance.new("Frame")
+StatsFrame.Size = UDim2.new(0, 410, 0, 75)
+StatsFrame.Position = UDim2.new(0.5, -205, 0, 450)
+StatsFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+StatsFrame.BorderSizePixel = 0
+StatsFrame.Parent = MainFrame
+
+local StatsCorner = Instance.new("UICorner")
+StatsCorner.CornerRadius = UDim.new(0, 8)
+StatsCorner.Parent = StatsFrame
+
+local StatusText = Instance.new("TextLabel")
+StatusText.Size = UDim2.new(1, -20, 0, 20)
+StatusText.Position = UDim2.new(0, 10, 0, 8)
+StatusText.BackgroundTransparency = 1
+StatusText.Text = "📊 Status: Idle"
+StatusText.TextColor3 = Color3.fromRGB(180, 180, 190)
+StatusText.TextSize = 13
+StatusText.Font = Enum.Font.GothamBold
+StatusText.TextXAlignment = Enum.TextXAlignment.Left
+StatusText.Parent = StatsFrame
+
+local StatsLine1 = Instance.new("TextLabel")
+StatsLine1.Size = UDim2.new(1, -20, 0, 18)
+StatsLine1.Position = UDim2.new(0, 10, 0, 30)
+StatsLine1.BackgroundTransparency = 1
+StatsLine1.Text = "🐟 Fish: 0 | Attempts: 0 | Errors: 0"
+StatsLine1.TextColor3 = Color3.fromRGB(150, 150, 160)
+StatsLine1.TextSize = 11
+StatsLine1.Font = Enum.Font.Gotham
+StatsLine1.TextXAlignment = Enum.TextXAlignment.Left
+StatsLine1.Parent = StatsFrame
+
+local StatsLine2 = Instance.new("TextLabel")
+StatsLine2.Size = UDim2.new(1, -20, 0, 18)
+StatsLine2.Position = UDim2.new(0, 10, 0, 50)
+StatsLine2.BackgroundTransparency = 1
+StatsLine2.Text = "⚡ CPM: 0.0 | Runtime: 0s"
+StatsLine2.TextColor3 = Color3.fromRGB(150, 150, 160)
+StatsLine2.TextSize = 11
+StatsLine2.Font = Enum.Font.Gotham
+StatsLine2.TextXAlignment = Enum.TextXAlignment.Left
+StatsLine2.Parent = StatsFrame
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 32, 0, 32)
+CloseBtn.Position = UDim2.new(1, -38, 0, 10)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 16
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Parent = MainFrame
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseBtn
+
+CloseBtn.MouseButton1Click:Connect(function()
+    Config.AutoFish = false
+    FishingActive = false
+    
+    pcall(function()
+        Net["RF/UpdateAutoFishingState"]:InvokeServer(false)
+    end)
+    
+    if Config.NoAnimation then
+        AnimationController:Enable()
+    end
+    
+    ScreenGui:Destroy()
+    print("🎣 Auto Farm closed")
+end)
+
+-- Update Stats Loop
+task.spawn(function()
+    while ScreenGui.Parent do
+        task.wait(0.5)
+        
+        local runtime = os.clock() - Stats.StartTime
+        local cpm = runtime > 0 and (Stats.FishCaught / runtime) * 60 or 0
+        
+        if Config.AutoFish then
+            StatusText.Text = "📊 Status: 🟢 FISHING ACTIVE"
+            StatusText.TextColor3 = Color3.fromRGB(100, 255, 100)
+        else
+            StatusText.Text = "📊 Status: ⭕ Stopped"
+            StatusText.TextColor3 = Color3.fromRGB(180, 180, 190)
+        end
+        
+        StatsLine1.Text = string.format("🐟 Fish: %d | Attempts: %d | Errors: %d", 
+            Stats.FishCaught, Stats.Attempts, Stats.Errors)
+        
+        StatsLine2.Text = string.format("⚡ CPM: %.1f | Runtime: %ds", 
+            cpm, math.floor(runtime))
+    end
+end)
+
+-- Character death handler
+task.spawn(function()
+    local char = Player.Character or Player.CharacterAdded:Wait()
+    
+    char.Humanoid.Died:Connect(function()
+        Config.AutoFish = false
+        FishingActive = false
+        
+        pcall(function()
+            Net["RF/UpdateAutoFishingState"]:InvokeServer(false)
+        end)
+        
+        warn("💀 Character died - fishing stopped")
+    end)
+end)
+
+-- Add to PlayerGui
+ScreenGui.Parent = Player:WaitForChild("PlayerGui")
+
+print("\n" .. string.rep("=", 60))
+print("🎣 FISH IT AUTO FARM - FULL CONTROL EDITION")
+print(string.rep("=", 60))
+print("👤 Player: " .. Player.Name)
+print("✨ Features:")
+print("  ✅ Auto Fish with customizable timings")
+print("  ✅ Anti-AFK system")
+print("  ✅ No Animation toggle (ON/OFF)")
+print("  ✅ All timing settings editable")
+print("")
+print("⚙️ All Timing Settings:")
+print("  • Charge Wait: " .. Config.ChargeWait .. "s")
+print("  • After Charge: " .. Config.AfterCharge .. "s")
+print("  • Cast Wait: " .. Config.CastWait .. "s")
+print("  • Minigame Wait: " .. Config.MinigameWait .. "s")
+print("  • Before Complete: " .. Config.BeforeComplete .. "s")
+print("  • After Complete: " .. Config.AfterComplete .. "s")
+print("  • Cast Power: " .. Config.CastPower)
+print("")
+print("📝 Edit values in GUI and press ENTER to apply!")
+print(string.rep("=", 60) .. "\n")
