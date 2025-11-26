@@ -425,7 +425,7 @@ end
 -- CREATE GUI DENGAN TAB SYSTEM
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "DanuScript"
+ScreenGui.Name = "TIKTOK @pemoedakinyis"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
@@ -462,7 +462,7 @@ local Subtitle = Instance.new("TextLabel")
 Subtitle.Size = UDim2.new(1, 0, 0, 18)
 Subtitle.Position = UDim2.new(0, 0, 0, 38)
 Subtitle.BackgroundTransparency = 1
-Subtitle.Text = "Fishing Bot & Cheat Menu"
+Subtitle.Text = "mampir ke tiktokku ya klo ada yg error"
 Subtitle.TextColor3 = Color3.fromRGB(140, 140, 150)
 Subtitle.TextSize = 9
 Subtitle.Font = Enum.Font.Gotham
