@@ -4,19 +4,24 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local UIS = game:GetService("UserInputService")
 
 local Net = ReplicatedStorage.Packages._Index["sleitnick_net@0.2.0"].net
 
 local Config = {
     BlatantMode = false, NoAnimation = false, FlyEnabled = false, SpeedEnabled = false, NoclipEnabled = false,
     FlySpeed = 50, WalkSpeed = 50, ReelDelay = 1, FishingDelay = 0, ChargeTime = 0.3,
-    MultiCast = false, CastAmount = 1, CastPower = 0.55, CastAngleMin = -0.8, CastAngleMax = 0.8
+    MultiCast = false, CastAmount = 1, CastPower = 0.55, CastAngleMin = -0.8, CastAngleMax = 0.8,
+    AutoRejoin = false, EnhancedAntiAFK = false
 }
 
 local Stats = { StartTime = 0, FishCaught = 0, Attempts = 0, Errors = 0, TotalSold = 0 }
 local AnimationController = { OriginalAnimate = nil, IsDisabled = false, Connection = nil }
 local FlyController = { BodyVelocity = nil, BodyGyro = nil, Connection = nil }
 local NoclipController = { Connection = nil }
+local AutoRejoinController = { Enabled = false }
+local EnhancedAntiAFKController = { Connection = nil, LastActivity = os.clock() }
 local GuiState = { IsMinimized = false, OriginalSize = UDim2.new(0, 400, 0, 500), MinimizedSize = UDim2.new(0, 200, 0, 45) }
 
 function AnimationController:Disable()
@@ -59,7 +64,7 @@ function FlyController:Enable()
             if not Config.FlyEnabled or not char or not rootPart then self:Disable(); return end
             local camera = workspace.CurrentCamera; if not camera then return end
             self.BodyGyro.CFrame = camera.CFrame
-            local moveDirection, UIS = Vector3.new(0,0,0), game:GetService("UserInputService")
+            local moveDirection = Vector3.new(0,0,0)
             if UIS:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + camera.CFrame.LookVector end
             if UIS:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - camera.CFrame.LookVector end
             if UIS:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - camera.CFrame.RightVector end
@@ -98,6 +103,82 @@ function NoclipController:Disable()
     if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
     local char = Player.Character
     if char then for _, part in pairs(char:GetDescendants()) do if part:IsA("BasePart") then part.CanCollide = true end end end
+end
+
+-- AUTO REJOIN SYSTEM
+function AutoRejoinController:Enable()
+    if self.Enabled then return end
+    self.Enabled = true
+    local placeId = game.PlaceId
+    
+    pcall(function()
+        game:GetService("CoreGui"):WaitForChild("RobloxPromptGui"):WaitForChild("promptOverlay").ChildAdded:Connect(function(child)
+            if Config.AutoRejoin and (child.Name == "ErrorPrompt" or child.Name == "2ButtonPrompt") then
+                task.wait(3)
+                pcall(function() TeleportService:Teleport(placeId, Player) end)
+            end
+        end)
+    end)
+    
+    game.Close:Connect(function()
+        if Config.AutoRejoin then
+            pcall(function() TeleportService:Teleport(placeId, Player) end)
+        end
+    end)
+end
+
+function AutoRejoinController:Disable()
+    self.Enabled = false
+end
+
+-- ENHANCED ANTI-AFK SYSTEM
+function EnhancedAntiAFKController:Enable()
+    if self.Connection then return end
+    self.LastActivity = os.clock()
+    
+    self.Connection = RunService.Heartbeat:Connect(function()
+        if not Config.EnhancedAntiAFK then return end
+        local now = os.clock()
+        if now - self.LastActivity >= 45 then
+            self.LastActivity = now
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new(math.random(0, 100), math.random(0, 100)))
+                VirtualUser:SetKeyDown(0x20)
+                task.wait(0.1)
+                VirtualUser:SetKeyUp(0x20)
+                local camera = workspace.CurrentCamera
+                if camera then
+                    local cf = camera.CFrame
+                    camera.CFrame = cf * CFrame.Angles(0, math.rad(math.random(-3, 3)), 0)
+                    task.wait(0.1)
+                    camera.CFrame = cf
+                end
+                if math.random(1, 4) == 1 then
+                    local char = Player.Character
+                    if char and char:FindFirstChild("Humanoid") then
+                        char.Humanoid.Jump = true
+                    end
+                end
+            end)
+        end
+    end)
+    
+    task.spawn(function()
+        while true do
+            task.wait(30)
+            if Config.EnhancedAntiAFK then
+                pcall(function()
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.new())
+                end)
+            end
+        end
+    end)
+end
+
+function EnhancedAntiAFKController:Disable()
+    if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
 end
 
 local function SellAllFish()
@@ -263,9 +344,11 @@ CreateSettingRow(FishingScrollFrame, "Cast Amount", "CastAmount", 3, 4)
 CreateSettingRow(FishingScrollFrame, "Cast Power", "CastPower", 0.55, 5)
 task.wait(); FishingScrollFrame.CanvasSize = UDim2.new(0, 0, 0, FishingLayout.AbsoluteContentSize.Y + 12)
 
+-- CHEAT FRAME
 local CheatFrame = Instance.new("Frame"); CheatFrame.Size = UDim2.new(0, 360, 0, 350); CheatFrame.Position = UDim2.new(0.5, -180, 0, 50)
 CheatFrame.BackgroundTransparency = 1; CheatFrame.Visible = false; CheatFrame.Parent = ContentFrame
 
+-- Row 1: Fly, Speed
 local CheatRow1 = Instance.new("Frame"); CheatRow1.Size = UDim2.new(1, 0, 0, 40); CheatRow1.BackgroundTransparency = 1; CheatRow1.Parent = CheatFrame
 local FlyBtn = Instance.new("TextButton"); FlyBtn.Size = UDim2.new(0.48, 0, 1, 0)
 FlyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); FlyBtn.Text = "Fly: OFF"; FlyBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
@@ -277,6 +360,7 @@ SpeedBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); SpeedBtn.Text = "Speed: 
 SpeedBtn.TextSize = 12; SpeedBtn.Font = Enum.Font.GothamSemibold; SpeedBtn.Parent = CheatRow1
 Instance.new("UICorner", SpeedBtn).CornerRadius = UDim.new(0, 6)
 
+-- Row 2: Noclip, Auto Rejoin
 local CheatRow2 = Instance.new("Frame"); CheatRow2.Size = UDim2.new(1, 0, 0, 40); CheatRow2.Position = UDim2.new(0, 0, 0, 48)
 CheatRow2.BackgroundTransparency = 1; CheatRow2.Parent = CheatFrame
 local NoclipBtn = Instance.new("TextButton"); NoclipBtn.Size = UDim2.new(0.48, 0, 1, 0)
@@ -284,11 +368,24 @@ NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoclipBtn.Text = "Nocli
 NoclipBtn.TextSize = 12; NoclipBtn.Font = Enum.Font.GothamSemibold; NoclipBtn.Parent = CheatRow2
 Instance.new("UICorner", NoclipBtn).CornerRadius = UDim.new(0, 6)
 
-local CheatSettingsLabel = Instance.new("TextLabel"); CheatSettingsLabel.Size = UDim2.new(1, 0, 0, 20); CheatSettingsLabel.Position = UDim2.new(0, 0, 0, 100)
+local AutoRejoinBtn = Instance.new("TextButton"); AutoRejoinBtn.Size = UDim2.new(0.48, 0, 1, 0); AutoRejoinBtn.Position = UDim2.new(0.52, 0, 0, 0)
+AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); AutoRejoinBtn.Text = "AutoRejoin: OFF"; AutoRejoinBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+AutoRejoinBtn.TextSize = 11; AutoRejoinBtn.Font = Enum.Font.GothamSemibold; AutoRejoinBtn.Parent = CheatRow2
+Instance.new("UICorner", AutoRejoinBtn).CornerRadius = UDim.new(0, 6)
+
+-- Row 3: Enhanced Anti-AFK
+local CheatRow3 = Instance.new("Frame"); CheatRow3.Size = UDim2.new(1, 0, 0, 40); CheatRow3.Position = UDim2.new(0, 0, 0, 96)
+CheatRow3.BackgroundTransparency = 1; CheatRow3.Parent = CheatFrame
+local EnhancedAFKBtn = Instance.new("TextButton"); EnhancedAFKBtn.Size = UDim2.new(0.48, 0, 1, 0)
+EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); EnhancedAFKBtn.Text = "AntiAFK+: OFF"; EnhancedAFKBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+EnhancedAFKBtn.TextSize = 11; EnhancedAFKBtn.Font = Enum.Font.GothamSemibold; EnhancedAFKBtn.Parent = CheatRow3
+Instance.new("UICorner", EnhancedAFKBtn).CornerRadius = UDim.new(0, 6)
+
+local CheatSettingsLabel = Instance.new("TextLabel"); CheatSettingsLabel.Size = UDim2.new(1, 0, 0, 20); CheatSettingsLabel.Position = UDim2.new(0, 0, 0, 145)
 CheatSettingsLabel.BackgroundTransparency = 1; CheatSettingsLabel.Text = "SETTINGS"; CheatSettingsLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
 CheatSettingsLabel.TextSize = 11; CheatSettingsLabel.Font = Enum.Font.GothamBold; CheatSettingsLabel.TextXAlignment = Enum.TextXAlignment.Left; CheatSettingsLabel.Parent = CheatFrame
 
-local CheatScrollFrame = Instance.new("ScrollingFrame"); CheatScrollFrame.Size = UDim2.new(1, 0, 0, 100); CheatScrollFrame.Position = UDim2.new(0, 0, 0, 123)
+local CheatScrollFrame = Instance.new("ScrollingFrame"); CheatScrollFrame.Size = UDim2.new(1, 0, 0, 100); CheatScrollFrame.Position = UDim2.new(0, 0, 0, 168)
 CheatScrollFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32); CheatScrollFrame.ScrollBarThickness = 4
 CheatScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(255, 100, 100); CheatScrollFrame.Parent = CheatFrame
 Instance.new("UICorner", CheatScrollFrame).CornerRadius = UDim.new(0, 8)
@@ -299,8 +396,8 @@ CreateSettingRow(CheatScrollFrame, "Fly Speed", "FlySpeed", 50, 1)
 CreateSettingRow(CheatScrollFrame, "Walk Speed", "WalkSpeed", 50, 2)
 task.wait(); CheatScrollFrame.CanvasSize = UDim2.new(0, 0, 0, CheatLayout.AbsoluteContentSize.Y + 12)
 
-local Instructions = Instance.new("TextLabel"); Instructions.Size = UDim2.new(1, 0, 0, 60); Instructions.Position = UDim2.new(0, 0, 0, 235)
-Instructions.BackgroundTransparency = 1; Instructions.Text = "Controls:\nFly: WASD + Space/Shift\nSpeed: Adjust Walk Speed above"
+local Instructions = Instance.new("TextLabel"); Instructions.Size = UDim2.new(1, 0, 0, 60); Instructions.Position = UDim2.new(0, 0, 0, 280)
+Instructions.BackgroundTransparency = 1; Instructions.Text = "Controls:\nFly: WASD + Space/Shift\nAutoRejoin: Auto reconnect jika DC\nAntiAFK+: Enhanced anti kick"
 Instructions.TextColor3 = Color3.fromRGB(150, 150, 160); Instructions.TextSize = 10; Instructions.Font = Enum.Font.Gotham
 Instructions.TextXAlignment = Enum.TextXAlignment.Left; Instructions.TextYAlignment = Enum.TextYAlignment.Top; Instructions.Parent = CheatFrame
 
@@ -328,6 +425,7 @@ CloseBtn.MouseButton1Click:Connect(function()
     if Config.FlyEnabled then FlyController:Disable() end
     if Config.SpeedEnabled then updateSpeed() end
     if Config.NoclipEnabled then NoclipController:Disable() end
+    if Config.EnhancedAntiAFK then EnhancedAntiAFKController:Disable() end
     ScreenGui:Destroy()
 end)
 
@@ -387,6 +485,28 @@ NoclipBtn.MouseButton1Click:Connect(function()
     else NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoclipBtn.Text = "Noclip: OFF"; NoclipController:Disable() end
 end)
 
+AutoRejoinBtn.MouseButton1Click:Connect(function()
+    Config.AutoRejoin = not Config.AutoRejoin
+    if Config.AutoRejoin then 
+        AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); AutoRejoinBtn.Text = "AutoRejoin: ON"
+        AutoRejoinController:Enable()
+    else 
+        AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); AutoRejoinBtn.Text = "AutoRejoin: OFF"
+        AutoRejoinController:Disable()
+    end
+end)
+
+EnhancedAFKBtn.MouseButton1Click:Connect(function()
+    Config.EnhancedAntiAFK = not Config.EnhancedAntiAFK
+    if Config.EnhancedAntiAFK then 
+        EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); EnhancedAFKBtn.Text = "AntiAFK+: ON"
+        EnhancedAntiAFKController:Enable()
+    else 
+        EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); EnhancedAFKBtn.Text = "AntiAFK+: OFF"
+        EnhancedAntiAFKController:Disable()
+    end
+end)
+
 task.spawn(function()
     while ScreenGui.Parent do
         task.wait(0.5); local runtime = os.clock() - Stats.StartTime
@@ -403,4 +523,4 @@ end)
 Player.CharacterAdded:Connect(function() task.wait(1); updateSpeed() end)
 
 ScreenGui.Parent = Player:WaitForChild("PlayerGui")
-print("Danu Script Loaded - Click - to minimize, + to expand")
+print("Danu Script Loaded - AutoRejoin & Enhanced Anti-AFK Added!")
