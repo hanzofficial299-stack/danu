@@ -20,13 +20,13 @@ local Config = {
     WalkSpeed = 50,
     
     -- Delay Settings
-    ReelDelay = 0.1,
-    FishingDelay = 0.2,
+    ReelDelay = 1,
+    FishingDelay = 0,
     ChargeTime = 0.3,
     
     -- Multi-Cast Settings
     MultiCast = false,
-    CastAmount = 3,
+    CastAmount = 1,
     
     -- Cast Settings 
     CastPower = 0.55,
