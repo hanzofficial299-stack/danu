@@ -3,38 +3,69 @@ local Player = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
 local TeleportService = game:GetService("TeleportService")
-local UIS = game:GetService("UserInputService")
-
+local UserInputService = game:GetService("UserInputService")
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
 local Net = ReplicatedStorage.Packages._Index["sleitnick_net@0.2.0"].net
 
 local Config = {
     BlatantMode = false, NoAnimation = false, FlyEnabled = false, SpeedEnabled = false, NoclipEnabled = false,
-    FlySpeed = 50, WalkSpeed = 50, ReelDelay = 1, FishingDelay = 0, ChargeTime = 0.3,
-    MultiCast = false, CastAmount = 1, CastPower = 0.55, CastAngleMin = -0.8, CastAngleMax = 0.8,
-    AutoRejoin = false, EnhancedAntiAFK = false
+    FlySpeed = 50, WalkSpeed = 50, ReelDelay = 0.1, FishingDelay = 0.2, ChargeTime = 0.3,
+    MultiCast = false, CastAmount = 3, CastPower = 0.55, CastAngleMin = -0.8, CastAngleMax = 0.8,
+    InstantFish = false, AutoSell = false, AutoSellThreshold = 50,
+    AutoBuyEventEnabled = false, SelectedEvent = "Wind", AutoBuyCheckInterval = 5,
+    AntiAFKEnabled = true, AutoRejoinEnabled = false, AutoRejoinDelay = 5, AntiLagEnabled = false
 }
 
-local Stats = { StartTime = 0, FishCaught = 0, Attempts = 0, Errors = 0, TotalSold = 0 }
-local AnimationController = { OriginalAnimate = nil, IsDisabled = false, Connection = nil }
+local EventList = { "Wind", "Cloudy", "Snow", "Storm", "Radiant", "Shark Hunt" }
+local Stats = { StartTime = 0, FishCaught = 0, TotalSold = 0 }
+local FishingActive = false
+
+local AnimationController = { IsDisabled = false, Connection = nil }
 local FlyController = { BodyVelocity = nil, BodyGyro = nil, Connection = nil }
 local NoclipController = { Connection = nil }
-local AutoRejoinController = { Enabled = false }
-local EnhancedAntiAFKController = { Connection = nil, LastActivity = os.clock() }
-local GuiState = { IsMinimized = false, OriginalSize = UDim2.new(0, 400, 0, 500), MinimizedSize = UDim2.new(0, 200, 0, 45) }
+local AutoBuyEventController = { Connection = nil, LastBuyTime = 0 }
+local AntiAFKController = { Connection = nil, IdleConnection = nil }
+local AutoRejoinController = { Connection = nil }
+local AntiLagController = { Enabled = false, OriginalSettings = {} }
+
+function AntiLagController:Enable()
+    if self.Enabled then return end
+    self.OriginalSettings = { GlobalShadows = Lighting.GlobalShadows, FogEnd = Lighting.FogEnd }
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        settings().Rendering.QualityLevel = 1
+        if Terrain then Terrain.Decoration = false end
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then v.Enabled = false
+                elseif v:IsA("MeshPart") or v:IsA("Part") then v.Material = Enum.Material.Plastic v.CastShadow = false end
+            end)
+        end
+    end)
+    self.Enabled = true
+end
+
+function AntiLagController:Disable()
+    if not self.Enabled then return end
+    pcall(function()
+        Lighting.GlobalShadows = self.OriginalSettings.GlobalShadows
+        Lighting.FogEnd = self.OriginalSettings.FogEnd
+        settings().Rendering.QualityLevel = 10
+    end)
+    self.Enabled = false
+end
 
 function AnimationController:Disable()
     if self.IsDisabled then return end
     pcall(function()
-        local char = Player.Character; if not char then return end
-        local humanoid = char:FindFirstChild("Humanoid")
-        if humanoid then
-            for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do track:Stop() end
-            self.Connection = humanoid.AnimationPlayed:Connect(function(animTrack) if Config.NoAnimation then animTrack:Stop() end end)
-        end
-        local animate = char:FindFirstChild("Animate")
-        if animate then self.OriginalAnimate = animate:Clone(); animate.Enabled = false end
+        local char = Player.Character if not char then return end
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then for _, t in pairs(hum:GetPlayingAnimationTracks()) do t:Stop() end
+            self.Connection = hum.AnimationPlayed:Connect(function(t) if Config.NoAnimation then t:Stop() end end) end
+        local anim = char:FindFirstChild("Animate") if anim then anim.Enabled = false end
     end)
     self.IsDisabled = true
 end
@@ -42,485 +73,344 @@ end
 function AnimationController:Enable()
     if not self.IsDisabled then return end
     pcall(function()
-        local char = Player.Character; if not char then return end
-        if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
-        local animate = char:FindFirstChild("Animate"); if animate then animate.Enabled = true end
+        local char = Player.Character if not char then return end
+        if self.Connection then self.Connection:Disconnect() self.Connection = nil end
+        local anim = char:FindFirstChild("Animate") if anim then anim.Enabled = true end
     end)
     self.IsDisabled = false
 end
 
 function FlyController:Enable()
     if self.Connection then return end
-    local function setupFly()
-        local char = Player.Character; if not char then return end
-        local humanoid, rootPart = char:FindFirstChild("Humanoid"), char:FindFirstChild("HumanoidRootPart")
-        if not humanoid or not rootPart then return end
-        if self.BodyVelocity then self.BodyVelocity:Destroy() end; if self.BodyGyro then self.BodyGyro:Destroy() end
-        self.BodyVelocity = Instance.new("BodyVelocity"); self.BodyVelocity.Velocity = Vector3.new(0,0,0)
-        self.BodyVelocity.MaxForce = Vector3.new(4000,4000,4000); self.BodyVelocity.P = 1000; self.BodyVelocity.Parent = rootPart
-        self.BodyGyro = Instance.new("BodyGyro"); self.BodyGyro.MaxTorque = Vector3.new(4000,4000,4000)
-        self.BodyGyro.P = 1000; self.BodyGyro.D = 50; self.BodyGyro.Parent = rootPart
+    local function setup()
+        local char = Player.Character if not char then return end
+        local root = char:FindFirstChild("HumanoidRootPart") if not root then return end
+        if self.BodyVelocity then self.BodyVelocity:Destroy() end
+        if self.BodyGyro then self.BodyGyro:Destroy() end
+        self.BodyVelocity = Instance.new("BodyVelocity") self.BodyVelocity.Velocity = Vector3.zero self.BodyVelocity.MaxForce = Vector3.new(4e4,4e4,4e4) self.BodyVelocity.P = 1000 self.BodyVelocity.Parent = root
+        self.BodyGyro = Instance.new("BodyGyro") self.BodyGyro.MaxTorque = Vector3.new(4e4,4e4,4e4) self.BodyGyro.P = 1000 self.BodyGyro.D = 50 self.BodyGyro.Parent = root
         self.Connection = RunService.Heartbeat:Connect(function()
-            if not Config.FlyEnabled or not char or not rootPart then self:Disable(); return end
-            local camera = workspace.CurrentCamera; if not camera then return end
-            self.BodyGyro.CFrame = camera.CFrame
-            local moveDirection = Vector3.new(0,0,0)
-            if UIS:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + camera.CFrame.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - camera.CFrame.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - camera.CFrame.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.D) then moveDirection = moveDirection + camera.CFrame.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.Space) then moveDirection = moveDirection + Vector3.new(0,1,0) end
-            if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then moveDirection = moveDirection + Vector3.new(0,-1,0) end
-            if moveDirection.Magnitude > 0 then moveDirection = moveDirection.Unit * Config.FlySpeed end
-            self.BodyVelocity.Velocity = moveDirection
+            if not Config.FlyEnabled or not root then self:Disable() return end
+            local cam = workspace.CurrentCamera if not cam then return end
+            self.BodyGyro.CFrame = cam.CFrame
+            local dir = Vector3.zero
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then dir = dir - Vector3.new(0,1,0) end
+            self.BodyVelocity.Velocity = dir.Magnitude > 0 and dir.Unit * Config.FlySpeed or Vector3.zero
         end)
     end
-    setupFly(); Player.CharacterAdded:Connect(function() if Config.FlyEnabled then task.wait(1); setupFly() end end)
+    setup()
+    Player.CharacterAdded:Connect(function() if Config.FlyEnabled then task.wait(1) setup() end end)
 end
 
 function FlyController:Disable()
-    if self.BodyVelocity then self.BodyVelocity:Destroy(); self.BodyVelocity = nil end
-    if self.BodyGyro then self.BodyGyro:Destroy(); self.BodyGyro = nil end
-    if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+    if self.BodyVelocity then self.BodyVelocity:Destroy() self.BodyVelocity = nil end
+    if self.BodyGyro then self.BodyGyro:Destroy() self.BodyGyro = nil end
+    if self.Connection then self.Connection:Disconnect() self.Connection = nil end
 end
 
 local function updateSpeed()
-    local char = Player.Character; if not char then return end
-    local humanoid = char:FindFirstChild("Humanoid")
-    if humanoid then humanoid.WalkSpeed = Config.SpeedEnabled and Config.WalkSpeed or 16 end
+    local char = Player.Character if char and char:FindFirstChild("Humanoid") then char.Humanoid.WalkSpeed = Config.SpeedEnabled and Config.WalkSpeed or 16 end
 end
 
 function NoclipController:Enable()
     if self.Connection then return end
     self.Connection = RunService.Stepped:Connect(function()
-        if not Config.NoclipEnabled then self:Disable(); return end
-        local char = Player.Character
-        if char then for _, part in pairs(char:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end end
+        if not Config.NoclipEnabled then self:Disable() return end
+        local char = Player.Character if char then for _, p in pairs(char:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide = false end end end
     end)
 end
 
 function NoclipController:Disable()
-    if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
-    local char = Player.Character
-    if char then for _, part in pairs(char:GetDescendants()) do if part:IsA("BasePart") then part.CanCollide = true end end end
+    if self.Connection then self.Connection:Disconnect() self.Connection = nil end
+    local char = Player.Character if char then for _, p in pairs(char:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide = true end end end
 end
 
--- AUTO REJOIN SYSTEM
-function AutoRejoinController:Enable()
-    if self.Enabled then return end
-    self.Enabled = true
-    local placeId = game.PlaceId
-    
-    pcall(function()
-        game:GetService("CoreGui"):WaitForChild("RobloxPromptGui"):WaitForChild("promptOverlay").ChildAdded:Connect(function(child)
-            if Config.AutoRejoin and (child.Name == "ErrorPrompt" or child.Name == "2ButtonPrompt") then
-                task.wait(3)
-                pcall(function() TeleportService:Teleport(placeId, Player) end)
-            end
-        end)
-    end)
-    
-    game.Close:Connect(function()
-        if Config.AutoRejoin then
-            pcall(function() TeleportService:Teleport(placeId, Player) end)
-        end
-    end)
+local function SellAllFish() local s = pcall(function() Net["RF/SellAllItems"]:InvokeServer() end) if s then Stats.TotalSold = Stats.TotalSold + 1 end return s end
+
+function AutoBuyEventController:PurchaseEvent(e)
+    local s, r = pcall(function() return Net["RF/PurchaseWeatherEvent"]:InvokeServer(e) end)
+    return s, r
 end
 
-function AutoRejoinController:Disable()
-    self.Enabled = false
-end
-
--- ENHANCED ANTI-AFK SYSTEM
-function EnhancedAntiAFKController:Enable()
+function AutoBuyEventController:Enable()
     if self.Connection then return end
-    self.LastActivity = os.clock()
-    
-    self.Connection = RunService.Heartbeat:Connect(function()
-        if not Config.EnhancedAntiAFK then return end
-        local now = os.clock()
-        if now - self.LastActivity >= 45 then
-            self.LastActivity = now
-            pcall(function()
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton2(Vector2.new(math.random(0, 100), math.random(0, 100)))
-                VirtualUser:SetKeyDown(0x20)
-                task.wait(0.1)
-                VirtualUser:SetKeyUp(0x20)
-                local camera = workspace.CurrentCamera
-                if camera then
-                    local cf = camera.CFrame
-                    camera.CFrame = cf * CFrame.Angles(0, math.rad(math.random(-3, 3)), 0)
-                    task.wait(0.1)
-                    camera.CFrame = cf
-                end
-                if math.random(1, 4) == 1 then
-                    local char = Player.Character
-                    if char and char:FindFirstChild("Humanoid") then
-                        char.Humanoid.Jump = true
-                    end
-                end
-            end)
+    self.Connection = task.spawn(function()
+        while Config.AutoBuyEventEnabled do
+            if os.clock() - self.LastBuyTime >= Config.AutoBuyCheckInterval then self:PurchaseEvent(Config.SelectedEvent) self.LastBuyTime = os.clock() end
+            task.wait(1)
         end
     end)
-    
-    task.spawn(function()
-        while true do
-            task.wait(30)
-            if Config.EnhancedAntiAFK then
-                pcall(function()
-                    VirtualUser:CaptureController()
-                    VirtualUser:ClickButton2(Vector2.new())
+end
+
+function AutoBuyEventController:Disable() if self.Connection then task.cancel(self.Connection) self.Connection = nil end end
+
+function AntiAFKController:Enable()
+    if self.IdleConnection then return end
+    self.IdleConnection = Player.Idled:Connect(function() if Config.AntiAFKEnabled then VirtualUser:CaptureController() VirtualUser:ClickButton2(Vector2.zero) end end)
+    self.Connection = task.spawn(function() while Config.AntiAFKEnabled do pcall(function() VirtualUser:CaptureController() VirtualUser:ClickButton2(Vector2.zero) end) task.wait(60) end end)
+end
+
+function AntiAFKController:Disable()
+    if self.IdleConnection then self.IdleConnection:Disconnect() self.IdleConnection = nil end
+    if self.Connection then task.cancel(self.Connection) self.Connection = nil end
+end
+
+function AutoRejoinController:Enable()
+    if self.Connection then return end
+    pcall(function() self.Connection = game:GetService("CoreGui").RobloxPromptGui.promptOverlay.ChildAdded:Connect(function() if Config.AutoRejoinEnabled then task.wait(Config.AutoRejoinDelay) TeleportService:Teleport(game.PlaceId, Player) end end) end)
+end
+
+function AutoRejoinController:Disable() if self.Connection then self.Connection:Disconnect() self.Connection = nil end end
+
+if Config.AntiAFKEnabled then AntiAFKController:Enable() end
+
+local function ExecuteFishing()
+    pcall(function()
+        if Config.MultiCast then
+            for i = 1, Config.CastAmount do
+                task.spawn(function()
+                    pcall(function() Net["RF/ChargeFishingRod"]:InvokeServer() end)
+                    if Config.ChargeTime > 0 then task.wait(Config.ChargeTime) end
+                    local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
+                    pcall(function() Net["RF/RequestFishingMinigameStarted"]:InvokeServer(angle, Config.CastPower, os.clock()) end)
+                    if Config.ReelDelay > 0 then task.wait(Config.ReelDelay) end
+                    pcall(function() Net["RE/ShakeFish"]:FireServer() Net["RE/ShakeFish"]:FireServer() end)
+                    pcall(function() Net["RE/FishingCompleted"]:FireServer() Net["RE/FishingCompleted"]:FireServer() end)
+                    Stats.FishCaught = Stats.FishCaught + 1
                 end)
             end
+            task.wait(Config.ChargeTime + Config.ReelDelay + 0.05)
+        elseif Config.InstantFish then
+            pcall(function() Net["RF/ChargeFishingRod"]:InvokeServer() end)
+            local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
+            pcall(function() Net["RF/RequestFishingMinigameStarted"]:InvokeServer(angle, Config.CastPower, os.clock()) end)
+            for i = 1, 3 do pcall(function() Net["RE/FishingCompleted"]:FireServer() Net["RE/ShakeFish"]:FireServer() end) end
+            Stats.FishCaught = Stats.FishCaught + 1
+        else
+            pcall(function() Net["RF/ChargeFishingRod"]:InvokeServer() end)
+            if Config.ChargeTime > 0 then task.wait(Config.ChargeTime) end
+            local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
+            pcall(function() Net["RF/RequestFishingMinigameStarted"]:InvokeServer(angle, Config.CastPower, os.clock()) end)
+            if Config.ReelDelay > 0 then task.wait(Config.ReelDelay) end
+            pcall(function() Net["RE/ShakeFish"]:FireServer() Net["RE/ShakeFish"]:FireServer() end)
+            pcall(function() Net["RE/FishingCompleted"]:FireServer() Net["RE/FishingCompleted"]:FireServer() end)
+            Stats.FishCaught = Stats.FishCaught + 1
         end
     end)
-end
-
-function EnhancedAntiAFKController:Disable()
-    if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
-end
-
-local function SellAllFish()
-    local success = pcall(function() return Net["RF/SellAllItems"]:InvokeServer() end)
-    if success then Stats.TotalSold = Stats.TotalSold + 1 end; return success
-end
-
-Player.Idled:Connect(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
-local FishingActive = false
-
-local function ExecuteSingleCast()
-    local success = pcall(function()
-        Net["RF/ChargeFishingRod"]:InvokeServer(); task.wait(Config.ChargeTime)
-        local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
-        Net["RF/RequestFishingMinigameStarted"]:InvokeServer(angle, Config.CastPower, os.clock())
-        task.wait(0.1 + Config.ReelDelay)
-        Net["RE/FishingCompleted"]:FireServer(); task.wait(0.05); Net["RE/FishingCompleted"]:FireServer()
-        Stats.FishCaught = Stats.FishCaught + 1; Stats.Attempts = Stats.Attempts + 1
-    end)
-    if not success then Stats.Errors = Stats.Errors + 1 end
-end
-
-local function ExecuteMultiCast()
-    local success = pcall(function()
-        local completed = 0
-        for i = 1, Config.CastAmount do
-            task.spawn(function()
-                Net["RF/ChargeFishingRod"]:InvokeServer(); task.wait(Config.ChargeTime)
-                local angle = Config.CastAngleMin + (math.random() * (Config.CastAngleMax - Config.CastAngleMin))
-                Net["RF/RequestFishingMinigameStarted"]:InvokeServer(angle, Config.CastPower, os.clock())
-                task.wait(Config.ReelDelay)
-                Net["RE/FishingCompleted"]:FireServer(); task.wait(0.03); Net["RE/FishingCompleted"]:FireServer()
-                Stats.FishCaught = Stats.FishCaught + 1; Stats.Attempts = Stats.Attempts + 1; completed = completed + 1
-            end)
-            task.wait(0.05)
-        end
-        local maxWait, startWait = (Config.ChargeTime + Config.ReelDelay + 0.2) * Config.CastAmount, os.clock()
-        while completed < Config.CastAmount and (os.clock() - startWait) < maxWait do task.wait(0.1) end
-    end)
-    if not success then Stats.Errors = Stats.Errors + 1 end
 end
 
 local function StartBlatantLoop()
     while Config.BlatantMode do
         if not FishingActive then
             FishingActive = true
-            if Config.MultiCast then ExecuteMultiCast() else ExecuteSingleCast() end
-            FishingActive = false; task.wait(Config.FishingDelay)
+            ExecuteFishing()
+            if Config.AutoSell and Stats.FishCaught > 0 and Stats.FishCaught % Config.AutoSellThreshold == 0 then SellAllFish() end
+            FishingActive = false
+            task.wait(Config.FishingDelay)
         end
-        task.wait(0.05)
+        task.wait(0.01)
     end
 end
+local ScreenGui = Instance.new("ScreenGui") ScreenGui.Name = "DanuScript" ScreenGui.ResetOnSpawn = false ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local MIN_W, MIN_H, MAX_W, MAX_H, DEF_W, DEF_H = 300, 450, 550, 750, 380, 620
 
--- GUI
-local ScreenGui = Instance.new("ScreenGui"); ScreenGui.Name = "DanuScript"; ScreenGui.ResetOnSpawn = false; ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-
-local MainFrame = Instance.new("Frame"); MainFrame.Name = "MainFrame"; MainFrame.Size = GuiState.OriginalSize
-MainFrame.Position = UDim2.new(0.5, -200, 0.5, -250); MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-MainFrame.BorderSizePixel = 0; MainFrame.Active = true; MainFrame.Draggable = true; MainFrame.ClipsDescendants = true; MainFrame.Parent = ScreenGui
+local MainFrame = Instance.new("Frame") MainFrame.Size = UDim2.new(0, DEF_W, 0, DEF_H) MainFrame.Position = UDim2.new(0.5, -DEF_W/2, 0.5, -DEF_H/2) MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24) MainFrame.BorderSizePixel = 0 MainFrame.Active = true MainFrame.Draggable = true MainFrame.ClipsDescendants = true MainFrame.Parent = ScreenGui
 Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-local stroke = Instance.new("UIStroke", MainFrame); stroke.Color = Color3.fromRGB(255, 80, 80); stroke.Thickness = 2; stroke.Transparency = 0.5
+local stroke = Instance.new("UIStroke", MainFrame) stroke.Color = Color3.fromRGB(255, 80, 80) stroke.Thickness = 2 stroke.Transparency = 0.5
 
-local TitleBar = Instance.new("Frame"); TitleBar.Size = UDim2.new(1, 0, 0, 45); TitleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
-TitleBar.BorderSizePixel = 0; TitleBar.Parent = MainFrame; Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+local ResizeHandle = Instance.new("TextButton", MainFrame) ResizeHandle.Size = UDim2.new(0, 20, 0, 20) ResizeHandle.Position = UDim2.new(1, -20, 1, -20) ResizeHandle.BackgroundColor3 = Color3.fromRGB(255, 80, 80) ResizeHandle.Text = "+" ResizeHandle.TextColor3 = Color3.fromRGB(255,255,255) ResizeHandle.TextSize = 14 ResizeHandle.Font = Enum.Font.GothamBold ResizeHandle.ZIndex = 10 Instance.new("UICorner", ResizeHandle).CornerRadius = UDim.new(0, 6)
 
-local Title = Instance.new("TextLabel"); Title.Size = UDim2.new(1, -100, 0, 25); Title.Position = UDim2.new(0, 12, 0, 5)
-Title.BackgroundTransparency = 1; Title.Text = "TIKTOK @pemoedakinyis"; Title.TextColor3 = Color3.fromRGB(255, 100, 100)
-Title.TextSize = 16; Title.Font = Enum.Font.GothamBold; Title.TextXAlignment = Enum.TextXAlignment.Left; Title.Parent = TitleBar
+local isResizing, resizeStartPos, resizeStartSize = false, nil, nil
+ResizeHandle.MouseButton1Down:Connect(function() isResizing = true resizeStartPos = UserInputService:GetMouseLocation() resizeStartSize = MainFrame.Size end)
+UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then isResizing = false end end)
+UserInputService.InputChanged:Connect(function(i) if isResizing and i.UserInputType == Enum.UserInputType.MouseMovement then local d = UserInputService:GetMouseLocation() - resizeStartPos MainFrame.Size = UDim2.new(0, math.clamp(resizeStartSize.X.Offset + d.X, MIN_W, MAX_W), 0, math.clamp(resizeStartSize.Y.Offset + d.Y, MIN_H, MAX_H)) end end)
 
-local Subtitle = Instance.new("TextLabel"); Subtitle.Size = UDim2.new(1, -100, 0, 14); Subtitle.Position = UDim2.new(0, 12, 0, 26)
-Subtitle.BackgroundTransparency = 1; Subtitle.Text = "mampir ke tiktokku ya"; Subtitle.TextColor3 = Color3.fromRGB(140, 140, 150)
-Subtitle.TextSize = 9; Subtitle.Font = Enum.Font.Gotham; Subtitle.TextXAlignment = Enum.TextXAlignment.Left; Subtitle.Parent = TitleBar
+local Title = Instance.new("TextLabel", MainFrame) Title.Size = UDim2.new(1, 0, 0, 40) Title.BackgroundTransparency = 1 Title.Text = "DANU SCRIPT" Title.TextColor3 = Color3.fromRGB(255, 100, 100) Title.TextSize = 20 Title.Font = Enum.Font.GothamBold
+local Subtitle = Instance.new("TextLabel", MainFrame) Subtitle.Size = UDim2.new(1, -120, 0, 18) Subtitle.Position = UDim2.new(0, 10, 0, 38) Subtitle.BackgroundTransparency = 1 Subtitle.Text = "[Fish It Auto Farm]" Subtitle.TextColor3 = Color3.fromRGB(140, 140, 150) Subtitle.TextSize = 10 Subtitle.Font = Enum.Font.Gotham Subtitle.TextXAlignment = Enum.TextXAlignment.Left
 
-local BtnContainer = Instance.new("Frame"); BtnContainer.Size = UDim2.new(0, 75, 0, 30); BtnContainer.Position = UDim2.new(1, -85, 0, 8)
-BtnContainer.BackgroundTransparency = 1; BtnContainer.Parent = TitleBar
+local TabContainer = Instance.new("Frame", MainFrame) TabContainer.Size = UDim2.new(1, -40, 0, 35) TabContainer.Position = UDim2.new(0, 20, 0, 60) TabContainer.BackgroundTransparency = 1
 
-local MinimizeBtn = Instance.new("TextButton"); MinimizeBtn.Size = UDim2.new(0, 30, 0, 30)
-MinimizeBtn.BackgroundColor3 = Color3.fromRGB(80, 150, 255); MinimizeBtn.Text = "-"; MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-MinimizeBtn.TextSize = 20; MinimizeBtn.Font = Enum.Font.GothamBold; MinimizeBtn.Parent = BtnContainer
-Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 6)
+local function MakeTab(txt, pos, active)
+    local b = Instance.new("TextButton", TabContainer) b.Size = UDim2.new(0.24, 0, 0, 32) b.Position = pos b.BackgroundColor3 = active and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80) b.Text = txt b.TextColor3 = Color3.fromRGB(255,255,255) b.TextSize = 10 b.Font = Enum.Font.GothamBold Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6) return b
+end
 
-local CloseBtn = Instance.new("TextButton"); CloseBtn.Size = UDim2.new(0, 30, 0, 30); CloseBtn.Position = UDim2.new(0, 38, 0, 0)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50); CloseBtn.Text = "X"; CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-CloseBtn.TextSize = 14; CloseBtn.Font = Enum.Font.GothamBold; CloseBtn.Parent = BtnContainer
-Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+local FishingTabBtn = MakeTab("FISHING", UDim2.new(0, 0, 0, 0), true)
+local CheatTabBtn = MakeTab("CHEAT", UDim2.new(0.25, 0, 0, 0), false)
+local EventTabBtn = MakeTab("EVENT", UDim2.new(0.50, 0, 0, 0), false)
+local HelpTabBtn = MakeTab("HELP", UDim2.new(0.75, 0, 0, 0), false)
 
-local ContentFrame = Instance.new("Frame"); ContentFrame.Size = UDim2.new(1, 0, 1, -45); ContentFrame.Position = UDim2.new(0, 0, 0, 45)
-ContentFrame.BackgroundTransparency = 1; ContentFrame.Parent = MainFrame
+local function MakeFrame() local f = Instance.new("ScrollingFrame", MainFrame) f.Size = UDim2.new(1, -40, 0, 450) f.Position = UDim2.new(0, 20, 0, 100) f.BackgroundColor3 = Color3.fromRGB(22, 22, 28) f.ScrollBarThickness = 6 f.Visible = false f.CanvasSize = UDim2.new(0, 0, 0, 800) Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8) local l = Instance.new("UIListLayout", f) l.Padding = UDim.new(0, 6) l.HorizontalAlignment = Enum.HorizontalAlignment.Center return f end
 
-local TabContainer = Instance.new("Frame"); TabContainer.Size = UDim2.new(0, 360, 0, 35); TabContainer.Position = UDim2.new(0.5, -180, 0, 10)
-TabContainer.BackgroundTransparency = 1; TabContainer.Parent = ContentFrame
+local FishingFrame = MakeFrame() FishingFrame.Visible = true
+local CheatFrame = MakeFrame()
+local EventFrame = MakeFrame()
+local HelpFrame = MakeFrame()
 
-local FishingTabBtn = Instance.new("TextButton"); FishingTabBtn.Size = UDim2.new(0, 175, 0, 32)
-FishingTabBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); FishingTabBtn.Text = "FISHING"; FishingTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-FishingTabBtn.TextSize = 13; FishingTabBtn.Font = Enum.Font.GothamBold; FishingTabBtn.Parent = TabContainer
-Instance.new("UICorner", FishingTabBtn).CornerRadius = UDim.new(0, 6)
+local function MakeButton(parent, txt, order, color)
+    local b = Instance.new("TextButton", parent) b.Size = UDim2.new(1, -16, 0, 38) b.BackgroundColor3 = color or Color3.fromRGB(220, 50, 50) b.Text = txt b.TextColor3 = Color3.fromRGB(255,255,255) b.TextSize = 12 b.Font = Enum.Font.GothamBold b.LayoutOrder = order Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8) return b
+end
 
-local CheatTabBtn = Instance.new("TextButton"); CheatTabBtn.Size = UDim2.new(0, 175, 0, 32); CheatTabBtn.Position = UDim2.new(1, -175, 0, 0)
-CheatTabBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100); CheatTabBtn.Text = "CHEAT"; CheatTabBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-CheatTabBtn.TextSize = 13; CheatTabBtn.Font = Enum.Font.GothamBold; CheatTabBtn.Parent = TabContainer
-Instance.new("UICorner", CheatTabBtn).CornerRadius = UDim.new(0, 6)
+local function MakeLabel(parent, txt, order)
+    local l = Instance.new("TextLabel", parent) l.Size = UDim2.new(1, -16, 0, 22) l.BackgroundTransparency = 1 l.Text = txt l.TextColor3 = Color3.fromRGB(200, 200, 210) l.TextSize = 11 l.Font = Enum.Font.GothamBold l.TextXAlignment = Enum.TextXAlignment.Left l.LayoutOrder = order return l
+end
 
-local FishingFrame = Instance.new("Frame"); FishingFrame.Size = UDim2.new(0, 360, 0, 350); FishingFrame.Position = UDim2.new(0.5, -180, 0, 50)
-FishingFrame.BackgroundTransparency = 1; FishingFrame.Visible = true; FishingFrame.Parent = ContentFrame
+local function MakeSetting(parent, name, configKey, order)
+    local c = Instance.new("Frame", parent) c.Size = UDim2.new(1, -16, 0, 36) c.BackgroundColor3 = Color3.fromRGB(35, 35, 42) c.LayoutOrder = order Instance.new("UICorner", c).CornerRadius = UDim.new(0, 6)
+    local l = Instance.new("TextLabel", c) l.Size = UDim2.new(0.65, 0, 1, 0) l.Position = UDim2.new(0, 10, 0, 0) l.BackgroundTransparency = 1 l.Text = name l.TextColor3 = Color3.fromRGB(200, 200, 210) l.TextSize = 10 l.Font = Enum.Font.GothamSemibold l.TextXAlignment = Enum.TextXAlignment.Left
+    local inp = Instance.new("TextBox", c) inp.Size = UDim2.new(0, 60, 0, 26) inp.Position = UDim2.new(1, -70, 0.5, -13) inp.BackgroundColor3 = Color3.fromRGB(45, 45, 55) inp.Text = tostring(Config[configKey]) inp.TextColor3 = Color3.fromRGB(255, 120, 120) inp.TextSize = 11 inp.Font = Enum.Font.GothamBold inp.ClearTextOnFocus = false Instance.new("UICorner", inp).CornerRadius = UDim.new(0, 6)
+    inp.FocusLost:Connect(function() local v = tonumber(inp.Text) if v and v >= 0 then Config[configKey] = v else inp.Text = tostring(Config[configKey]) end end)
+end
 
-local BlatantBtn = Instance.new("TextButton"); BlatantBtn.Size = UDim2.new(1, 0, 0, 40)
-BlatantBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50); BlatantBtn.Text = "START FISHING"; BlatantBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-BlatantBtn.TextSize = 15; BlatantBtn.Font = Enum.Font.GothamBold; BlatantBtn.Parent = FishingFrame
-Instance.new("UICorner", BlatantBtn).CornerRadius = UDim.new(0, 8)
+local BlatantBtn = MakeButton(FishingFrame, "[START FISHING]", 1, Color3.fromRGB(220, 50, 50))
+BlatantBtn.MouseButton1Click:Connect(function()
+    Config.BlatantMode = not Config.BlatantMode
+    if Config.BlatantMode then BlatantBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100) BlatantBtn.Text = "[STOP FISHING]" Stats.StartTime = os.clock() Stats.FishCaught, Stats.TotalSold = 0, 0 task.spawn(StartBlatantLoop)
+    else BlatantBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50) BlatantBtn.Text = "[START FISHING]" FishingActive = false end
+end)
 
-local ToggleContainer = Instance.new("Frame"); ToggleContainer.Size = UDim2.new(1, 0, 0, 40); ToggleContainer.Position = UDim2.new(0, 0, 0, 48)
-ToggleContainer.BackgroundTransparency = 1; ToggleContainer.Parent = FishingFrame
+MakeLabel(FishingFrame, "-- FISHING MODE --", 2)
 
-local NoAnimBtn = Instance.new("TextButton"); NoAnimBtn.Size = UDim2.new(0.48, 0, 1, 0)
-NoAnimBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoAnimBtn.Text = "Anim: ON"; NoAnimBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-NoAnimBtn.TextSize = 12; NoAnimBtn.Font = Enum.Font.GothamSemibold; NoAnimBtn.Parent = ToggleContainer
-Instance.new("UICorner", NoAnimBtn).CornerRadius = UDim.new(0, 6)
+local InstantFishBtn = MakeButton(FishingFrame, "Instant Fish: OFF", 3, Color3.fromRGB(220, 50, 50))
+InstantFishBtn.MouseButton1Click:Connect(function() Config.InstantFish = not Config.InstantFish InstantFishBtn.BackgroundColor3 = Config.InstantFish and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) InstantFishBtn.Text = Config.InstantFish and "Instant Fish: ON" or "Instant Fish: OFF" end)
 
-local MultiCastBtn = Instance.new("TextButton"); MultiCastBtn.Size = UDim2.new(0.48, 0, 1, 0); MultiCastBtn.Position = UDim2.new(0.52, 0, 0, 0)
-MultiCastBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); MultiCastBtn.Text = "Single Cast"; MultiCastBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-MultiCastBtn.TextSize = 12; MultiCastBtn.Font = Enum.Font.GothamSemibold; MultiCastBtn.Parent = ToggleContainer
-Instance.new("UICorner", MultiCastBtn).CornerRadius = UDim.new(0, 6)
+local MultiCastBtn = MakeButton(FishingFrame, "Multi Cast: OFF", 4, Color3.fromRGB(220, 50, 50))
+MultiCastBtn.MouseButton1Click:Connect(function() Config.MultiCast = not Config.MultiCast MultiCastBtn.BackgroundColor3 = Config.MultiCast and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) MultiCastBtn.Text = Config.MultiCast and "Multi Cast: ON (x"..Config.CastAmount..")" or "Multi Cast: OFF" end)
 
-local SellFishBtn = Instance.new("TextButton"); SellFishBtn.Size = UDim2.new(1, 0, 0, 32); SellFishBtn.Position = UDim2.new(0, 0, 0, 95)
-SellFishBtn.BackgroundColor3 = Color3.fromRGB(80, 150, 255); SellFishBtn.Text = "SELL ALL FISH"; SellFishBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-SellFishBtn.TextSize = 12; SellFishBtn.Font = Enum.Font.GothamBold; SellFishBtn.Parent = FishingFrame
-Instance.new("UICorner", SellFishBtn).CornerRadius = UDim.new(0, 6)
+MakeLabel(FishingFrame, "-- OPTIONS --", 5)
 
-local SettingsLabel = Instance.new("TextLabel"); SettingsLabel.Size = UDim2.new(1, 0, 0, 20); SettingsLabel.Position = UDim2.new(0, 0, 0, 135)
-SettingsLabel.BackgroundTransparency = 1; SettingsLabel.Text = "SETTINGS"; SettingsLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
-SettingsLabel.TextSize = 11; SettingsLabel.Font = Enum.Font.GothamBold; SettingsLabel.TextXAlignment = Enum.TextXAlignment.Left; SettingsLabel.Parent = FishingFrame
+local AutoSellBtn = MakeButton(FishingFrame, "Auto Sell: OFF", 6, Color3.fromRGB(220, 50, 50))
+AutoSellBtn.MouseButton1Click:Connect(function() Config.AutoSell = not Config.AutoSell AutoSellBtn.BackgroundColor3 = Config.AutoSell and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) AutoSellBtn.Text = Config.AutoSell and "Auto Sell: ON" or "Auto Sell: OFF" end)
 
-local FishingScrollFrame = Instance.new("ScrollingFrame"); FishingScrollFrame.Size = UDim2.new(1, 0, 0, 180); FishingScrollFrame.Position = UDim2.new(0, 0, 0, 158)
-FishingScrollFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32); FishingScrollFrame.ScrollBarThickness = 4
-FishingScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(255, 100, 100); FishingScrollFrame.Parent = FishingFrame
-Instance.new("UICorner", FishingScrollFrame).CornerRadius = UDim.new(0, 8)
-local FishingLayout = Instance.new("UIListLayout", FishingScrollFrame); FishingLayout.Padding = UDim.new(0, 6)
-local FishingPadding = Instance.new("UIPadding", FishingScrollFrame); FishingPadding.PaddingTop = UDim.new(0, 6); FishingPadding.PaddingLeft = UDim.new(0, 6); FishingPadding.PaddingRight = UDim.new(0, 6)
+local NoAnimBtn = MakeButton(FishingFrame, "No Animation: OFF", 7, Color3.fromRGB(220, 50, 50))
+NoAnimBtn.MouseButton1Click:Connect(function() Config.NoAnimation = not Config.NoAnimation NoAnimBtn.BackgroundColor3 = Config.NoAnimation and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) NoAnimBtn.Text = Config.NoAnimation and "No Animation: ON" or "No Animation: OFF" if Config.NoAnimation then AnimationController:Disable() else AnimationController:Enable() end end)
 
-local function CreateSettingRow(parent, name, configKey, defaultValue, layoutOrder)
-    local container = Instance.new("Frame"); container.Size = UDim2.new(1, -12, 0, 38)
-    container.BackgroundColor3 = Color3.fromRGB(35, 35, 45); container.LayoutOrder = layoutOrder; container.Parent = parent
-    Instance.new("UICorner", container).CornerRadius = UDim.new(0, 6)
-    local label = Instance.new("TextLabel"); label.Size = UDim2.new(0.6, 0, 1, 0); label.Position = UDim2.new(0, 10, 0, 0)
-    label.BackgroundTransparency = 1; label.Text = name; label.TextColor3 = Color3.fromRGB(200, 200, 210)
-    label.TextSize = 11; label.Font = Enum.Font.GothamSemibold; label.TextXAlignment = Enum.TextXAlignment.Left; label.Parent = container
-    local input = Instance.new("TextBox"); input.Size = UDim2.new(0, 70, 0, 26); input.Position = UDim2.new(1, -80, 0.5, -13)
-    input.BackgroundColor3 = Color3.fromRGB(45, 45, 55); input.Text = tostring(Config[configKey]); input.TextColor3 = Color3.fromRGB(255, 120, 120)
-    input.TextSize = 11; input.Font = Enum.Font.GothamBold; input.ClearTextOnFocus = false; input.Parent = container
-    Instance.new("UICorner", input).CornerRadius = UDim.new(0, 4)
-    input.FocusLost:Connect(function()
-        local value = tonumber(input.Text)
-        if value and value >= 0 then Config[configKey] = value; input.TextColor3 = Color3.fromRGB(100, 255, 100)
-            task.wait(0.3); input.TextColor3 = Color3.fromRGB(255, 120, 120)
-        else input.Text = tostring(Config[configKey]) end
+local SellFishBtn = MakeButton(FishingFrame, "[SELL ALL FISH NOW]", 8, Color3.fromRGB(80, 150, 255))
+SellFishBtn.MouseButton1Click:Connect(SellAllFish)
+
+MakeLabel(FishingFrame, "-- SETTINGS --", 9)
+MakeSetting(FishingFrame, "Charge Time (detik)", "ChargeTime", 10)
+MakeSetting(FishingFrame, "Reel Delay (detik)", "ReelDelay", 11)
+MakeSetting(FishingFrame, "Fish Delay (detik)", "FishingDelay", 12)
+MakeSetting(FishingFrame, "Cast Amount (multi)", "CastAmount", 13)
+MakeSetting(FishingFrame, "Auto Sell Every (ikan)", "AutoSellThreshold", 14)
+MakeSetting(FishingFrame, "Cast Power (0-1)", "CastPower", 15)
+MakeLabel(CheatFrame, "-- MOVEMENT --", 1)
+
+local FlyBtn = MakeButton(CheatFrame, "Fly: OFF", 2, Color3.fromRGB(220, 50, 50))
+FlyBtn.MouseButton1Click:Connect(function() Config.FlyEnabled = not Config.FlyEnabled FlyBtn.BackgroundColor3 = Config.FlyEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) FlyBtn.Text = Config.FlyEnabled and "Fly: ON" or "Fly: OFF" if Config.FlyEnabled then FlyController:Enable() else FlyController:Disable() end end)
+
+local SpeedBtn = MakeButton(CheatFrame, "Speed Hack: OFF", 3, Color3.fromRGB(220, 50, 50))
+SpeedBtn.MouseButton1Click:Connect(function() Config.SpeedEnabled = not Config.SpeedEnabled SpeedBtn.BackgroundColor3 = Config.SpeedEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) SpeedBtn.Text = Config.SpeedEnabled and "Speed Hack: ON" or "Speed Hack: OFF" updateSpeed() end)
+
+local NoclipBtn = MakeButton(CheatFrame, "Noclip: OFF", 4, Color3.fromRGB(220, 50, 50))
+NoclipBtn.MouseButton1Click:Connect(function() Config.NoclipEnabled = not Config.NoclipEnabled NoclipBtn.BackgroundColor3 = Config.NoclipEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) NoclipBtn.Text = Config.NoclipEnabled and "Noclip: ON" or "Noclip: OFF" if Config.NoclipEnabled then NoclipController:Enable() else NoclipController:Disable() end end)
+
+MakeLabel(CheatFrame, "-- PERFORMANCE --", 5)
+
+local AntiLagBtn = MakeButton(CheatFrame, "Anti Lag: OFF", 6, Color3.fromRGB(220, 50, 50))
+AntiLagBtn.MouseButton1Click:Connect(function() Config.AntiLagEnabled = not Config.AntiLagEnabled AntiLagBtn.BackgroundColor3 = Config.AntiLagEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) AntiLagBtn.Text = Config.AntiLagEnabled and "Anti Lag: ON" or "Anti Lag: OFF" if Config.AntiLagEnabled then AntiLagController:Enable() else AntiLagController:Disable() end end)
+
+MakeLabel(CheatFrame, "-- SETTINGS --", 7)
+MakeSetting(CheatFrame, "Fly Speed", "FlySpeed", 8)
+MakeSetting(CheatFrame, "Walk Speed", "WalkSpeed", 9)
+
+MakeLabel(EventFrame, "-- AUTO BUY EVENT --", 1)
+
+local AutoBuyEventBtn = MakeButton(EventFrame, "Auto Buy Event: OFF", 2, Color3.fromRGB(220, 50, 50))
+AutoBuyEventBtn.MouseButton1Click:Connect(function() Config.AutoBuyEventEnabled = not Config.AutoBuyEventEnabled AutoBuyEventBtn.BackgroundColor3 = Config.AutoBuyEventEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) AutoBuyEventBtn.Text = Config.AutoBuyEventEnabled and ("Auto Buy: " .. Config.SelectedEvent) or "Auto Buy Event: OFF" if Config.AutoBuyEventEnabled then AutoBuyEventController:Enable() else AutoBuyEventController:Disable() end end)
+
+MakeLabel(EventFrame, "-- SELECT EVENT --", 3)
+
+local eventButtons = {}
+local ManualBuyBtn
+
+for i, en in ipairs(EventList) do
+    local eb = MakeButton(EventFrame, en, 3 + i, Config.SelectedEvent == en and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80))
+    eb.Size = UDim2.new(1, -16, 0, 32)
+    eventButtons[en] = eb
+    eb.MouseButton1Click:Connect(function()
+        Config.SelectedEvent = en
+        for n, b in pairs(eventButtons) do b.BackgroundColor3 = n == en and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80) end
+        if Config.AutoBuyEventEnabled then AutoBuyEventBtn.Text = "Auto Buy: " .. en end
+        if ManualBuyBtn then ManualBuyBtn.Text = "[BUY " .. en .. " NOW]" end
     end)
 end
 
-CreateSettingRow(FishingScrollFrame, "Charge Time (s)", "ChargeTime", 0.3, 1)
-CreateSettingRow(FishingScrollFrame, "Reel Delay (s)", "ReelDelay", 0.1, 2)
-CreateSettingRow(FishingScrollFrame, "Fishing Delay (s)", "FishingDelay", 0.2, 3)
-CreateSettingRow(FishingScrollFrame, "Cast Amount", "CastAmount", 3, 4)
-CreateSettingRow(FishingScrollFrame, "Cast Power", "CastPower", 0.55, 5)
-task.wait(); FishingScrollFrame.CanvasSize = UDim2.new(0, 0, 0, FishingLayout.AbsoluteContentSize.Y + 12)
+ManualBuyBtn = MakeButton(EventFrame, "[BUY " .. Config.SelectedEvent .. " NOW]", 10, Color3.fromRGB(80, 150, 255))
+ManualBuyBtn.MouseButton1Click:Connect(function() ManualBuyBtn.Text = "Buying..." local s = AutoBuyEventController:PurchaseEvent(Config.SelectedEvent) ManualBuyBtn.Text = s and "Success!" or "Failed!" task.wait(1) ManualBuyBtn.Text = "[BUY " .. Config.SelectedEvent .. " NOW]" end)
 
--- CHEAT FRAME
-local CheatFrame = Instance.new("Frame"); CheatFrame.Size = UDim2.new(0, 360, 0, 350); CheatFrame.Position = UDim2.new(0.5, -180, 0, 50)
-CheatFrame.BackgroundTransparency = 1; CheatFrame.Visible = false; CheatFrame.Parent = ContentFrame
+MakeLabel(EventFrame, "-- UTILITY --", 11)
 
--- Row 1: Fly, Speed
-local CheatRow1 = Instance.new("Frame"); CheatRow1.Size = UDim2.new(1, 0, 0, 40); CheatRow1.BackgroundTransparency = 1; CheatRow1.Parent = CheatFrame
-local FlyBtn = Instance.new("TextButton"); FlyBtn.Size = UDim2.new(0.48, 0, 1, 0)
-FlyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); FlyBtn.Text = "Fly: OFF"; FlyBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-FlyBtn.TextSize = 12; FlyBtn.Font = Enum.Font.GothamSemibold; FlyBtn.Parent = CheatRow1
-Instance.new("UICorner", FlyBtn).CornerRadius = UDim.new(0, 6)
+local AntiAFKBtn = MakeButton(EventFrame, Config.AntiAFKEnabled and "Anti AFK: ON" or "Anti AFK: OFF", 12, Config.AntiAFKEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50))
+AntiAFKBtn.MouseButton1Click:Connect(function() Config.AntiAFKEnabled = not Config.AntiAFKEnabled AntiAFKBtn.BackgroundColor3 = Config.AntiAFKEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) AntiAFKBtn.Text = Config.AntiAFKEnabled and "Anti AFK: ON" or "Anti AFK: OFF" if Config.AntiAFKEnabled then AntiAFKController:Enable() else AntiAFKController:Disable() end end)
 
-local SpeedBtn = Instance.new("TextButton"); SpeedBtn.Size = UDim2.new(0.48, 0, 1, 0); SpeedBtn.Position = UDim2.new(0.52, 0, 0, 0)
-SpeedBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); SpeedBtn.Text = "Speed: OFF"; SpeedBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-SpeedBtn.TextSize = 12; SpeedBtn.Font = Enum.Font.GothamSemibold; SpeedBtn.Parent = CheatRow1
-Instance.new("UICorner", SpeedBtn).CornerRadius = UDim.new(0, 6)
+local AutoRejoinBtn = MakeButton(EventFrame, "Auto Rejoin: OFF", 13, Color3.fromRGB(220, 50, 50))
+AutoRejoinBtn.MouseButton1Click:Connect(function() Config.AutoRejoinEnabled = not Config.AutoRejoinEnabled AutoRejoinBtn.BackgroundColor3 = Config.AutoRejoinEnabled and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(220, 50, 50) AutoRejoinBtn.Text = Config.AutoRejoinEnabled and "Auto Rejoin: ON" or "Auto Rejoin: OFF" if Config.AutoRejoinEnabled then AutoRejoinController:Enable() else AutoRejoinController:Disable() end end)
 
--- Row 2: Noclip, Auto Rejoin
-local CheatRow2 = Instance.new("Frame"); CheatRow2.Size = UDim2.new(1, 0, 0, 40); CheatRow2.Position = UDim2.new(0, 0, 0, 48)
-CheatRow2.BackgroundTransparency = 1; CheatRow2.Parent = CheatFrame
-local NoclipBtn = Instance.new("TextButton"); NoclipBtn.Size = UDim2.new(0.48, 0, 1, 0)
-NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoclipBtn.Text = "Noclip: OFF"; NoclipBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-NoclipBtn.TextSize = 12; NoclipBtn.Font = Enum.Font.GothamSemibold; NoclipBtn.Parent = CheatRow2
-Instance.new("UICorner", NoclipBtn).CornerRadius = UDim.new(0, 6)
-
-local AutoRejoinBtn = Instance.new("TextButton"); AutoRejoinBtn.Size = UDim2.new(0.48, 0, 1, 0); AutoRejoinBtn.Position = UDim2.new(0.52, 0, 0, 0)
-AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); AutoRejoinBtn.Text = "AutoRejoin: OFF"; AutoRejoinBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-AutoRejoinBtn.TextSize = 11; AutoRejoinBtn.Font = Enum.Font.GothamSemibold; AutoRejoinBtn.Parent = CheatRow2
-Instance.new("UICorner", AutoRejoinBtn).CornerRadius = UDim.new(0, 6)
-
--- Row 3: Enhanced Anti-AFK
-local CheatRow3 = Instance.new("Frame"); CheatRow3.Size = UDim2.new(1, 0, 0, 40); CheatRow3.Position = UDim2.new(0, 0, 0, 96)
-CheatRow3.BackgroundTransparency = 1; CheatRow3.Parent = CheatFrame
-local EnhancedAFKBtn = Instance.new("TextButton"); EnhancedAFKBtn.Size = UDim2.new(0.48, 0, 1, 0)
-EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); EnhancedAFKBtn.Text = "AntiAFK+: OFF"; EnhancedAFKBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-EnhancedAFKBtn.TextSize = 11; EnhancedAFKBtn.Font = Enum.Font.GothamSemibold; EnhancedAFKBtn.Parent = CheatRow3
-Instance.new("UICorner", EnhancedAFKBtn).CornerRadius = UDim.new(0, 6)
-
-local CheatSettingsLabel = Instance.new("TextLabel"); CheatSettingsLabel.Size = UDim2.new(1, 0, 0, 20); CheatSettingsLabel.Position = UDim2.new(0, 0, 0, 145)
-CheatSettingsLabel.BackgroundTransparency = 1; CheatSettingsLabel.Text = "SETTINGS"; CheatSettingsLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
-CheatSettingsLabel.TextSize = 11; CheatSettingsLabel.Font = Enum.Font.GothamBold; CheatSettingsLabel.TextXAlignment = Enum.TextXAlignment.Left; CheatSettingsLabel.Parent = CheatFrame
-
-local CheatScrollFrame = Instance.new("ScrollingFrame"); CheatScrollFrame.Size = UDim2.new(1, 0, 0, 100); CheatScrollFrame.Position = UDim2.new(0, 0, 0, 168)
-CheatScrollFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32); CheatScrollFrame.ScrollBarThickness = 4
-CheatScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(255, 100, 100); CheatScrollFrame.Parent = CheatFrame
-Instance.new("UICorner", CheatScrollFrame).CornerRadius = UDim.new(0, 8)
-local CheatLayout = Instance.new("UIListLayout", CheatScrollFrame); CheatLayout.Padding = UDim.new(0, 6)
-local CheatPadding = Instance.new("UIPadding", CheatScrollFrame); CheatPadding.PaddingTop = UDim.new(0, 6); CheatPadding.PaddingLeft = UDim.new(0, 6); CheatPadding.PaddingRight = UDim.new(0, 6)
-
-CreateSettingRow(CheatScrollFrame, "Fly Speed", "FlySpeed", 50, 1)
-CreateSettingRow(CheatScrollFrame, "Walk Speed", "WalkSpeed", 50, 2)
-task.wait(); CheatScrollFrame.CanvasSize = UDim2.new(0, 0, 0, CheatLayout.AbsoluteContentSize.Y + 12)
-
-local Instructions = Instance.new("TextLabel"); Instructions.Size = UDim2.new(1, 0, 0, 60); Instructions.Position = UDim2.new(0, 0, 0, 280)
-Instructions.BackgroundTransparency = 1; Instructions.Text = "Controls:\nFly: WASD + Space/Shift\nAutoRejoin: Auto reconnect jika DC\nAntiAFK+: Enhanced anti kick"
-Instructions.TextColor3 = Color3.fromRGB(150, 150, 160); Instructions.TextSize = 10; Instructions.Font = Enum.Font.Gotham
-Instructions.TextXAlignment = Enum.TextXAlignment.Left; Instructions.TextYAlignment = Enum.TextYAlignment.Top; Instructions.Parent = CheatFrame
-
-local StatsFrame = Instance.new("Frame"); StatsFrame.Size = UDim2.new(0, 360, 0, 35); StatsFrame.Position = UDim2.new(0.5, -180, 1, -45)
-StatsFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20); StatsFrame.Parent = ContentFrame
-Instance.new("UICorner", StatsFrame).CornerRadius = UDim.new(0, 6)
-local StatsText = Instance.new("TextLabel"); StatsText.Size = UDim2.new(1, -16, 1, 0); StatsText.Position = UDim2.new(0, 8, 0, 0)
-StatsText.BackgroundTransparency = 1; StatsText.Text = "Fish: 0 | Sold: 0 | CPM: 0"; StatsText.TextColor3 = Color3.fromRGB(180, 180, 190)
-StatsText.TextSize = 11; StatsText.Font = Enum.Font.Gotham; StatsText.TextXAlignment = Enum.TextXAlignment.Left; StatsText.Parent = StatsFrame
-
--- CONNECTIONS
-local function ToggleMinimize()
-    GuiState.IsMinimized = not GuiState.IsMinimized
-    local targetSize = GuiState.IsMinimized and GuiState.MinimizedSize or GuiState.OriginalSize
-    local tween = TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = targetSize})
-    tween:Play(); ContentFrame.Visible = not GuiState.IsMinimized; MinimizeBtn.Text = GuiState.IsMinimized and "+" or "-"
-    Subtitle.Text = GuiState.IsMinimized and "Click + to expand" or "mampir ke tiktokku ya"
+MakeSetting(EventFrame, "Auto Buy Interval (detik)", "AutoBuyCheckInterval", 14)
+local function MakeHelpSection(parent, title, content, order)
+    local c = Instance.new("Frame", parent) c.Size = UDim2.new(1, -16, 0, 0) c.BackgroundColor3 = Color3.fromRGB(30, 30, 40) c.LayoutOrder = order c.AutomaticSize = Enum.AutomaticSize.Y Instance.new("UICorner", c).CornerRadius = UDim.new(0, 8)
+    local pad = Instance.new("UIPadding", c) pad.PaddingTop = UDim.new(0, 8) pad.PaddingBottom = UDim.new(0, 8) pad.PaddingLeft = UDim.new(0, 10) pad.PaddingRight = UDim.new(0, 10)
+    local t = Instance.new("TextLabel", c) t.Size = UDim2.new(1, 0, 0, 18) t.BackgroundTransparency = 1 t.Text = title t.TextColor3 = Color3.fromRGB(255, 150, 150) t.TextSize = 12 t.Font = Enum.Font.GothamBold t.TextXAlignment = Enum.TextXAlignment.Left
+    local d = Instance.new("TextLabel", c) d.Size = UDim2.new(1, 0, 0, 0) d.Position = UDim2.new(0, 0, 0, 22) d.BackgroundTransparency = 1 d.Text = content d.TextColor3 = Color3.fromRGB(180, 180, 190) d.TextSize = 10 d.Font = Enum.Font.Gotham d.TextXAlignment = Enum.TextXAlignment.Left d.TextYAlignment = Enum.TextYAlignment.Top d.TextWrapped = true d.AutomaticSize = Enum.AutomaticSize.Y
 end
 
-MinimizeBtn.MouseButton1Click:Connect(ToggleMinimize)
+MakeHelpSection(HelpFrame, "[PANDUAN PEMULA]", "Selamat datang di Danu Script!\n\n1. Klik [START FISHING] untuk mulai\n2. Script akan otomatis cast, shake, dan reel\n3. Ikan akan tercatch otomatis\n4. Gunakan Auto Sell agar inventory tidak penuh", 1)
 
-CloseBtn.MouseButton1Click:Connect(function()
-    Config.BlatantMode = false; FishingActive = false
-    if Config.NoAnimation then AnimationController:Enable() end
-    if Config.FlyEnabled then FlyController:Disable() end
-    if Config.SpeedEnabled then updateSpeed() end
-    if Config.NoclipEnabled then NoclipController:Disable() end
-    if Config.EnhancedAntiAFK then EnhancedAntiAFKController:Disable() end
-    ScreenGui:Destroy()
-end)
+MakeHelpSection(HelpFrame, "[INSTANT FISH]", "Mode tercepat untuk farming!\n\nCara pakai:\n- Nyalakan Instant Fish: ON\n- Klik [START FISHING]\n\nPenjelasan:\n- Skip animasi cast dan reel\n- Langsung complete fishing\n- Cocok untuk farming cepat\n\nRekomendasi Setting:\n- Charge Time: 0\n- Reel Delay: 0\n- Fish Delay: 0.01", 2)
 
-FishingTabBtn.MouseButton1Click:Connect(function()
-    FishingFrame.Visible = true; CheatFrame.Visible = false
-    FishingTabBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); FishingTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    CheatTabBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100); CheatTabBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-end)
+MakeHelpSection(HelpFrame, "[MULTI CAST]", "Lempar banyak pancing sekaligus!\n\nCara pakai:\n- Nyalakan Multi Cast: ON\n- Set Cast Amount (misal 3-5)\n- Klik [START FISHING]\n\nPenjelasan:\n- Lempar beberapa pancing bersamaan\n- Dapat lebih banyak ikan per cycle\n- Bisa digabung dengan mode lain\n\nRekomendasi Setting:\n- Cast Amount: 3-5\n- Charge Time: 0.1\n- Fish Delay: 0.1", 3)
 
-CheatTabBtn.MouseButton1Click:Connect(function()
-    FishingFrame.Visible = false; CheatFrame.Visible = true
-    FishingTabBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100); FishingTabBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    CheatTabBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); CheatTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-end)
+MakeHelpSection(HelpFrame, "[MODE AMAN / SAFE]", "Untuk menghindari deteksi/ban!\n\nCara pakai:\n- Matikan Instant Fish\n- Matikan Multi Cast\n- Set delay lebih tinggi\n\nRekomendasi Setting:\n- Charge Time: 0.4-0.5\n- Reel Delay: 0.2-0.3\n- Fish Delay: 0.3-0.5\n\nTips:\n- Lebih lambat tapi lebih aman\n- Cocok untuk AFK lama", 4)
 
-BlatantBtn.MouseButton1Click:Connect(function()
-    Config.BlatantMode = not Config.BlatantMode
-    if Config.BlatantMode then
-        BlatantBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); BlatantBtn.Text = "STOP FISHING"
-        Stats.StartTime = os.clock(); Stats.FishCaught = 0; Stats.Attempts = 0; Stats.Errors = 0
-        task.spawn(StartBlatantLoop)
-    else
-        BlatantBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50); BlatantBtn.Text = "START FISHING"; FishingActive = false
-    end
-end)
+MakeHelpSection(HelpFrame, "[MODE CEPAT / FAST]", "Keseimbangan speed dan safety!\n\nRekomendasi Setting:\n- Charge Time: 0.1-0.2\n- Reel Delay: 0.05-0.1\n- Fish Delay: 0.1-0.15\n\nTips:\n- Cukup cepat tapi tidak terlalu mencurigakan\n- Cocok untuk farming harian", 5)
 
-NoAnimBtn.MouseButton1Click:Connect(function()
-    Config.NoAnimation = not Config.NoAnimation
-    if Config.NoAnimation then NoAnimBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); NoAnimBtn.Text = "Anim: OFF"; AnimationController:Disable()
-    else NoAnimBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoAnimBtn.Text = "Anim: ON"; AnimationController:Enable() end
-end)
+MakeHelpSection(HelpFrame, "[FITUR CHEAT]", "Fly: Terbang dengan WASD + Space/Shift\n- Space = naik, Shift = turun\n- Atur Fly Speed sesuai kebutuhan\n\nSpeed Hack: Jalan lebih cepat\n- Atur Walk Speed (default 50)\n\nNoclip: Tembus tembok/objek\n- Berguna untuk akses area tertentu\n\nAnti Lag: Boost FPS\n- Matikan efek visual\n- Cocok untuk HP kentang", 6)
 
-MultiCastBtn.MouseButton1Click:Connect(function()
-    Config.MultiCast = not Config.MultiCast
-    if Config.MultiCast then MultiCastBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); MultiCastBtn.Text = "Multi Cast"
-    else MultiCastBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); MultiCastBtn.Text = "Single Cast" end
-end)
+MakeHelpSection(HelpFrame, "[FITUR EVENT]", "Auto Buy Event: Beli event otomatis\n- Pilih event yang diinginkan\n- Nyalakan Auto Buy Event\n- Script akan beli setiap interval\n\nEvent tersedia:\n- Wind, Cloudy, Snow\n- Storm, Radiant, Shark Hunt\n\nAnti AFK: Mencegah kick karena idle\n- Otomatis aktif saat script jalan\n\nAuto Rejoin: Reconnect otomatis\n- Jika disconnect, akan rejoin", 7)
 
-SellFishBtn.MouseButton1Click:Connect(SellAllFish)
+MakeHelpSection(HelpFrame, "[REKOMENDASI SETTING]", "PEMULA (Aman):\n- Instant Fish: OFF\n- Multi Cast: OFF\n- Charge: 0.3, Reel: 0.2, Delay: 0.3\n\nMENENGAH (Balanced):\n- Instant Fish: OFF\n- Multi Cast: ON (3x)\n- Charge: 0.15, Reel: 0.1, Delay: 0.15\n\nPRO (Maximum Speed):\n- Instant Fish: ON\n- Multi Cast: ON (5x)\n- Charge: 0, Reel: 0, Delay: 0.01", 8)
+local function SwitchTab(activeTab)
+    FishingFrame.Visible = activeTab == "fishing"
+    CheatFrame.Visible = activeTab == "cheat"
+    EventFrame.Visible = activeTab == "event"
+    HelpFrame.Visible = activeTab == "help"
+    FishingTabBtn.BackgroundColor3 = activeTab == "fishing" and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80)
+    CheatTabBtn.BackgroundColor3 = activeTab == "cheat" and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80)
+    EventTabBtn.BackgroundColor3 = activeTab == "event" and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80)
+    HelpTabBtn.BackgroundColor3 = activeTab == "help" and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(60, 60, 80)
+end
 
-FlyBtn.MouseButton1Click:Connect(function()
-    Config.FlyEnabled = not Config.FlyEnabled
-    if Config.FlyEnabled then FlyBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); FlyBtn.Text = "Fly: ON"; FlyController:Enable()
-    else FlyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); FlyBtn.Text = "Fly: OFF"; FlyController:Disable() end
-end)
+FishingTabBtn.MouseButton1Click:Connect(function() SwitchTab("fishing") end)
+CheatTabBtn.MouseButton1Click:Connect(function() SwitchTab("cheat") end)
+EventTabBtn.MouseButton1Click:Connect(function() SwitchTab("event") end)
+HelpTabBtn.MouseButton1Click:Connect(function() SwitchTab("help") end)
 
-SpeedBtn.MouseButton1Click:Connect(function()
-    Config.SpeedEnabled = not Config.SpeedEnabled
-    if Config.SpeedEnabled then SpeedBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); SpeedBtn.Text = "Speed: ON"
-    else SpeedBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); SpeedBtn.Text = "Speed: OFF" end
-    updateSpeed()
-end)
+local StatsFrame = Instance.new("Frame", MainFrame) StatsFrame.Size = UDim2.new(1, -40, 0, 45) StatsFrame.Position = UDim2.new(0, 20, 1, -55) StatsFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20) StatsFrame.BorderSizePixel = 0 Instance.new("UICorner", StatsFrame).CornerRadius = UDim.new(0, 8)
+local StatsText = Instance.new("TextLabel", StatsFrame) StatsText.Size = UDim2.new(1, -16, 1, -8) StatsText.Position = UDim2.new(0, 8, 0, 4) StatsText.BackgroundTransparency = 1 StatsText.Text = "Fish: 0 | Sold: 0 | 0/min" StatsText.TextColor3 = Color3.fromRGB(180, 180, 190) StatsText.TextSize = 11 StatsText.Font = Enum.Font.Gotham StatsText.TextXAlignment = Enum.TextXAlignment.Left
 
-NoclipBtn.MouseButton1Click:Connect(function()
-    Config.NoclipEnabled = not Config.NoclipEnabled
-    if Config.NoclipEnabled then NoclipBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); NoclipBtn.Text = "Noclip: ON"; NoclipController:Enable()
-    else NoclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); NoclipBtn.Text = "Noclip: OFF"; NoclipController:Disable() end
-end)
+local CloseBtn = Instance.new("TextButton", MainFrame) CloseBtn.Size = UDim2.new(0, 30, 0, 30) CloseBtn.Position = UDim2.new(1, -36, 0, 8) CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50) CloseBtn.Text = "X" CloseBtn.TextColor3 = Color3.fromRGB(255,255,255) CloseBtn.TextSize = 14 CloseBtn.Font = Enum.Font.GothamBold Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
 
-AutoRejoinBtn.MouseButton1Click:Connect(function()
-    Config.AutoRejoin = not Config.AutoRejoin
-    if Config.AutoRejoin then 
-        AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); AutoRejoinBtn.Text = "AutoRejoin: ON"
-        AutoRejoinController:Enable()
-    else 
-        AutoRejoinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); AutoRejoinBtn.Text = "AutoRejoin: OFF"
-        AutoRejoinController:Disable()
-    end
-end)
+local MinimizeBtn = Instance.new("TextButton", MainFrame) MinimizeBtn.Size = UDim2.new(0, 30, 0, 30) MinimizeBtn.Position = UDim2.new(1, -70, 0, 8) MinimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 50) MinimizeBtn.Text = "-" MinimizeBtn.TextColor3 = Color3.fromRGB(255,255,255) MinimizeBtn.TextSize = 18 MinimizeBtn.Font = Enum.Font.GothamBold Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 6)
 
-EnhancedAFKBtn.MouseButton1Click:Connect(function()
-    Config.EnhancedAntiAFK = not Config.EnhancedAntiAFK
-    if Config.EnhancedAntiAFK then 
-        EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(50, 220, 100); EnhancedAFKBtn.Text = "AntiAFK+: ON"
-        EnhancedAntiAFKController:Enable()
-    else 
-        EnhancedAFKBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75); EnhancedAFKBtn.Text = "AntiAFK+: OFF"
-        EnhancedAntiAFKController:Disable()
-    end
-end)
+local SizeBtn = Instance.new("TextButton", MainFrame) SizeBtn.Size = UDim2.new(0, 30, 0, 30) SizeBtn.Position = UDim2.new(1, -104, 0, 8) SizeBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 255) SizeBtn.Text = "S" SizeBtn.TextColor3 = Color3.fromRGB(255,255,255) SizeBtn.TextSize = 12 SizeBtn.Font = Enum.Font.GothamBold Instance.new("UICorner", SizeBtn).CornerRadius = UDim.new(0, 6)
 
-task.spawn(function()
-    while ScreenGui.Parent do
-        task.wait(0.5); local runtime = os.clock() - Stats.StartTime
-        local cpm = runtime > 0 and (Stats.FishCaught / runtime) * 60 or 0
-        StatsText.Text = string.format("Fish: %d | Sold: %d | CPM: %.1f", Stats.FishCaught, Stats.TotalSold, cpm)
-    end
-end)
+local SizePresets = { Small = {300, 500}, Medium = {380, 620}, Large = {450, 700} }
+local currentPreset = "Medium"
+SizeBtn.MouseButton1Click:Connect(function() currentPreset = currentPreset == "Medium" and "Small" or (currentPreset == "Small" and "Large" or "Medium") SizeBtn.Text = currentPreset:sub(1,1) local p = SizePresets[currentPreset] MainFrame.Size = UDim2.new(0, p[1], 0, p[2]) end)
 
-task.spawn(function()
-    local char = Player.Character or Player.CharacterAdded:Wait()
-    char.Humanoid.Died:Connect(function() Config.BlatantMode = false; FishingActive = false end)
-end)
+local isMinimized, savedSize = false, nil
+MinimizeBtn.MouseButton1Click:Connect(function() isMinimized = not isMinimized if isMinimized then savedSize = MainFrame.Size MainFrame.Size = UDim2.new(0, MainFrame.Size.X.Offset, 0, 50) MinimizeBtn.Text = "+" TabContainer.Visible, FishingFrame.Visible, CheatFrame.Visible, EventFrame.Visible, HelpFrame.Visible, StatsFrame.Visible, ResizeHandle.Visible = false, false, false, false, false, false, false else MainFrame.Size = savedSize or UDim2.new(0, DEF_W, 0, DEF_H) MinimizeBtn.Text = "-" TabContainer.Visible, StatsFrame.Visible, ResizeHandle.Visible = true, true, true SwitchTab("fishing") end end)
 
-Player.CharacterAdded:Connect(function() task.wait(1); updateSpeed() end)
+CloseBtn.MouseButton1Click:Connect(function() Config.BlatantMode = false FishingActive = false if Config.NoAnimation then AnimationController:Enable() end if Config.FlyEnabled then FlyController:Disable() end if Config.SpeedEnabled then Config.SpeedEnabled = false updateSpeed() end if Config.NoclipEnabled then NoclipController:Disable() end if Config.AutoBuyEventEnabled then AutoBuyEventController:Disable() end if Config.AntiAFKEnabled then AntiAFKController:Disable() end if Config.AutoRejoinEnabled then AutoRejoinController:Disable() end if Config.AntiLagEnabled then AntiLagController:Disable() end ScreenGui:Destroy() end)
+
+task.spawn(function() while ScreenGui.Parent do task.wait(0.5) local rt = os.clock() - Stats.StartTime local cpm = rt > 0 and (Stats.FishCaught / rt) * 60 or 0 StatsText.Text = string.format("Fish: %d | Sold: %d | %.1f/min", Stats.FishCaught, Stats.TotalSold, cpm) end end)
+task.spawn(function() local char = Player.Character or Player.CharacterAdded:Wait() if char:FindFirstChild("Humanoid") then char.Humanoid.Died:Connect(function() Config.BlatantMode = false FishingActive = false end) end end)
+Player.CharacterAdded:Connect(function() task.wait(1) updateSpeed() end)
 
 ScreenGui.Parent = Player:WaitForChild("PlayerGui")
-print("Danu Script Loaded - AutoRejoin & Enhanced Anti-AFK Added!")
